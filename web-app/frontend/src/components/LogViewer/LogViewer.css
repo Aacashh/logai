@@ -1,7 +1,8 @@
 /* LogViewer - WellCAD Style */
 .log-viewer {
   background: var(--color-surface-light);
-  min-height: 100%;
+  display: block;
+  /* Don't constrain height - let SVG determine size and parent will scroll */
 }
 
 .log-viewer.loading,

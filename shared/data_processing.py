@@ -15,6 +15,7 @@ NULL_VALUES = [-999.25, -999, -9999, -9999.25, -999.2500, -999.00]
 def handle_null_values(df, null_values=None):
     """
     Replace null values with NaN to create gaps in plots.
+    Optimized using vectorized pandas operations.
     
     Args:
         df: pandas DataFrame
@@ -29,8 +30,8 @@ def handle_null_values(df, null_values=None):
     df_clean = df.copy()
     for col in df_clean.columns:
         if pd.api.types.is_numeric_dtype(df_clean[col]):
-            for null_val in null_values:
-                df_clean[col] = df_clean[col].replace(null_val, np.nan)
+            # Vectorized replacement - much faster than loop
+            df_clean[col] = df_clean[col].replace(null_values, np.nan)
     
     return df_clean
 
@@ -208,6 +209,7 @@ def export_to_las(df, header_info, depth_unit='m'):
 def df_to_json(df, depth_col='DEPTH'):
     """
     Convert DataFrame to JSON format for API response.
+    Optimized for performance using vectorized operations.
     
     Args:
         df: pandas DataFrame
@@ -223,9 +225,20 @@ def df_to_json(df, depth_col='DEPTH'):
     
     for col in df.columns:
         if col != depth_col:
-            # Convert to list, replacing NaN with None for JSON
-            values = df[col].tolist()
-            values = [None if pd.isna(v) else v for v in values]
-            result['curves'][col] = values
+            # Use numpy's where for fast NaN replacement - vectorized operation
+            series = df[col]
+            # Convert NaN to None in a fast vectorized way
+            mask = pd.isna(series)
+            if mask.any():
+                # Only process if there are NaN values
+                values = series.values.tolist()
+                # Fast in-place replacement using numpy
+                null_indices = np.where(mask)[0]
+                for idx in null_indices:
+                    values[idx] = None
+                result['curves'][col] = values
+            else:
+                # No NaN, just convert directly
+                result['curves'][col] = series.tolist()
     
     return result

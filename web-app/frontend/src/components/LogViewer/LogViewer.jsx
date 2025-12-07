@@ -9,48 +9,43 @@ function LogViewer({ wellData, curveData, settings, loading }) {
   // Track configuration - WellCAD style
   const trackConfig = useMemo(() => ({
     depth: { 
-      width: 50,
+      width: 60, // Slightly wider for readability
       title: 'Depth',
       unit: wellData?.depth_unit || 'm'
     },
     gr: { 
-      width: 120, 
-      title: 'Gamma',
-      color: '#00AA00',
-      unit: 'GAPI',
+      width: 250, 
+      title: 'Gamma Ray',
+      color: '#00AA00', // Green
+      unit: 'gAPI',
       min: settings.trackSettings.gr.min,
       max: settings.trackSettings.gr.max,
       scale: 'linear'
     },
     res: { 
-      width: 120, 
-      title: 'RPOR',
-      subtitle: 'CODE',
-      color: '#0000FF',
+      width: 250, 
+      title: 'Resistivity',
+      subtitle: 'ohm.m',
+      color: '#0000FF', // Deep Blue
+      medColor: '#FF0000', // Med Red
+      shalColor: '#FFA500', // Shal Orange
       unit: 'ohm.m',
       min: settings.trackSettings.res.min,
       max: settings.trackSettings.res.max,
       scale: 'log'
     },
     dn: { 
-      width: 120, 
-      title: 'MC4F',
-      subtitle: 'MC2F',
-      densColor: '#00AA00',
-      neutColor: '#0000FF',
-      densUnit: 'US/M',
-      neutUnit: 'US/M',
+      width: 250, 
+      title: 'Porosity & Density',
+      subtitle: 'DN',
+      densColor: '#FF0000', // Red
+      neutColor: '#0000FF', // Blue
+      densUnit: 'g/cc',
+      neutUnit: 'v/v',
       densMin: settings.trackSettings.dens.min,
       densMax: settings.trackSettings.dens.max,
       neutMin: settings.trackSettings.neut.min,
       neutMax: settings.trackSettings.neut.max,
-    },
-    cade: {
-      width: 100,
-      title: 'CADE',
-      color: '#CC0000',
-      min: 90,
-      max: 130
     }
   }), [settings.trackSettings, wellData?.depth_unit])
   
@@ -58,13 +53,16 @@ function LogViewer({ wellData, curveData, settings, loading }) {
   const dimensions = useMemo(() => {
     const headerHeight = 40
     const totalWidth = trackConfig.depth.width + trackConfig.gr.width + 
-                       trackConfig.res.width + trackConfig.dn.width + 
-                       trackConfig.cade.width + 20
+                       trackConfig.res.width + trackConfig.dn.width + 20
     
     // Calculate height based on depth range and scale
+    // At 1:500 scale, 1 meter = 0.2 cm on plot, so 500m = 100cm = 1000px (approx)
     const depthRange = (settings.depthRange.end || 0) - (settings.depthRange.start || 0)
+    // Convert to plot height: depth * (100 cm per unit at 1:1) / scale * pixels per cm
+    // For better readability, use 50 pixels per cm (more zoomed in than typical 37.8)
     const heightCm = (depthRange * 100) / settings.scale
-    const heightPx = Math.max(400, Math.min(heightCm * 37.8, 10000))
+    const pxPerCm = 50 // Increased for better visibility
+    const heightPx = Math.max(800, heightCm * pxPerCm) // Min 800px, no max cap for scrolling
     
     return {
       width: totalWidth,
@@ -97,12 +95,13 @@ function LogViewer({ wellData, curveData, settings, loading }) {
       .domain([depthMin, depthMax])
       .range([headerHeight, headerHeight + plotHeight])
     
-    // Line generator
+    // Optimized line generator with curve simplification for better rendering performance
     const createLine = (xScale) => {
       return d3.line()
         .defined(d => d.value !== null && !isNaN(d.value))
         .x(d => xScale(d.value))
         .y(d => yScale(d.depth))
+        .curve(d3.curveMonotoneY) // Smoother curves with less overhead
     }
     
     // Draw track header box - WellCAD style
@@ -284,15 +283,15 @@ function LogViewer({ wellData, curveData, settings, loading }) {
       if (settings.showGrFill) {
         const area = d3.area()
           .defined(d => d.value !== null && !isNaN(d.value))
-          .x0(xOffset)
-          .x1(d => grScale(Math.min(d.value, trackConfig.gr.max)))
+          .x0(d => grScale(d.value))
+          .x1(xOffset + trackConfig.gr.width) // Fill to Right Edge
           .y(d => yScale(d.depth))
         
         grGroup.append('path')
           .datum(grData)
           .attr('d', area)
-          .attr('fill', '#90EE90')
-          .attr('fill-opacity', 0.4)
+          .attr('fill', '#FFFF00') // Yellow for Sand
+          .attr('fill-opacity', 0.5)
       }
       
       // Line
@@ -310,8 +309,11 @@ function LogViewer({ wellData, curveData, settings, loading }) {
     // ========================================
     // RESISTIVITY TRACK
     // ========================================
-    const resKey = mapping.RES_DEEP
-    if (resKey && curves[resKey]) {
+    const resDeepKey = mapping.RES_DEEP
+    const resMedKey = mapping.RES_MED
+    const resShalKey = mapping.RES_SHAL
+
+    if ((resDeepKey && curves[resDeepKey]) || (resMedKey && curves[resMedKey]) || (resShalKey && curves[resShalKey])) {
       const resGroup = svg.append('g')
         .attr('class', 'track track-res')
       
@@ -335,23 +337,31 @@ function LogViewer({ wellData, curveData, settings, loading }) {
             .attr('y1', headerHeight)
             .attr('y2', headerHeight + plotHeight)
             .attr('stroke', tick === 1 || tick === 10 || tick === 100 ? '#C0C0C0' : '#E8E8E8')
+            .attr('stroke-width', tick === 1 || tick === 10 || tick === 100 ? 1 : 0.5)
         }
       })
       
-      // Data
-      const resData = depth.map((d, i) => ({
-        depth: d,
-        value: curves[resKey][i]
-      }))
-      
-      // Line
-      const resLine = createLine(resScale)
-      resGroup.append('path')
-        .datum(resData)
-        .attr('d', resLine)
-        .attr('fill', 'none')
-        .attr('stroke', '#0000FF')
-        .attr('stroke-width', 1.5)
+      // Helper to draw res curve
+      const drawResCurve = (key, color) => {
+        if (key && curves[key]) {
+           const data = depth.map((d, i) => ({
+            depth: d,
+            value: curves[key][i]
+          }))
+          const line = createLine(resScale)
+          resGroup.append('path')
+            .datum(data)
+            .attr('d', line)
+            .attr('fill', 'none')
+            .attr('stroke', color)
+            .attr('stroke-width', 1.5)
+        }
+      }
+
+      // Draw in order: Deep -> Med -> Shallow (so shallow is on top)
+      drawResCurve(resDeepKey, trackConfig.res.color)   // Blue
+      drawResCurve(resMedKey, trackConfig.res.medColor) // Red
+      drawResCurve(resShalKey, trackConfig.res.shalColor) // Orange
       
       xOffset += trackConfig.res.width
     }
@@ -390,7 +400,7 @@ function LogViewer({ wellData, curveData, settings, loading }) {
         .attr('text-anchor', 'middle')
         .attr('font-size', '9px')
         .attr('font-weight', 'bold')
-        .text('MC4F / MC2F')
+        .text('Bulk Density / Neutron Porosity')
       
       dnGroup.append('rect')
         .attr('x', xOffset + 2)
@@ -405,7 +415,7 @@ function LogViewer({ wellData, curveData, settings, loading }) {
         .attr('y', 31)
         .attr('text-anchor', 'middle')
         .attr('font-size', '8px')
-        .text('100 US/M 700')
+        .text(`${trackConfig.dn.densMin} ${trackConfig.dn.densUnit} ${trackConfig.dn.densMax}  |  ${trackConfig.dn.neutMax} ${trackConfig.dn.neutUnit} ${trackConfig.dn.neutMin}`)
       
       drawTrackBackground(dnGroup, xOffset, trackConfig.dn.width, headerHeight, plotHeight)
       
@@ -431,7 +441,7 @@ function LogViewer({ wellData, curveData, settings, loading }) {
           .datum(densData)
           .attr('d', densLine)
           .attr('fill', 'none')
-          .attr('stroke', '#00AA00')
+          .attr('stroke', trackConfig.dn.densColor)
           .attr('stroke-width', 1.5)
       }
       
@@ -447,60 +457,64 @@ function LogViewer({ wellData, curveData, settings, loading }) {
           .datum(neutData)
           .attr('d', neutLine)
           .attr('fill', 'none')
-          .attr('stroke', '#0000FF')
+          .attr('stroke', trackConfig.dn.neutColor)
+          .attr('stroke-dasharray', '4,2')
           .attr('stroke-width', 1.5)
+      }
+
+      // Crossover Shading
+      if (settings.showDnCrossover && densKey && neutKey && curves[densKey] && curves[neutKey]) {
+        // Create combined data for area generation
+        const areaData = depth.map((d, i) => ({
+          depth: d,
+          dens: curves[densKey][i],
+          neut: curves[neutKey][i],
+          y: yScale(d)
+        })).filter(d => 
+          d.dens !== null && !isNaN(d.dens) && 
+          d.neut !== null && !isNaN(d.neut)
+        )
+
+        // Gas Effect (Crossover): Density (Red) is to the LEFT of Neutron (Blue)
+        // Visually: Density < Neutron (technically High Porosity vs Low Density)
+        // Wait, Density Scale: 1.95 -> 2.95 (Left to Right). Low Density = Left.
+        // Neutron Scale: 0.45 -> -0.15 (Left to Right). High Porosity = Left.
+        // Real Gas Crossover: Density reads LOW (Left), Neutron reads LOW (Right).
+        // So Density X < Neutron X.
+        
+        // Define Gas Area (fill Yellow or Red)
+        const gasArea = d3.area()
+          .y(d => d.y)
+          .x0(d => densScale(d.dens))
+          .x1(d => neutScale(d.neut))
+          .defined(d => densScale(d.dens) < neutScale(d.neut)) // Only where Density is Left of Neutron
+
+        dnGroup.insert('path', ':first-child')
+          .datum(areaData)
+          .attr('d', gasArea)
+          .attr('fill', '#FFFF00') // Yellow for Gas
+          .attr('fill-opacity', 0.5)
+
+        // Separation (Shale/Water): Density is to the RIGHT of Neutron
+        const separationArea = d3.area()
+          .y(d => d.y)
+          .x0(d => densScale(d.dens))
+          .x1(d => neutScale(d.neut))
+          .defined(d => densScale(d.dens) > neutScale(d.neut))
+        
+        dnGroup.insert('path', ':first-child')
+          .datum(areaData)
+          .attr('d', separationArea)
+          .attr('fill', '#808080') // Gray for Shale/Water separation
+          .attr('fill-opacity', 0.3)
       }
       
       xOffset += trackConfig.dn.width
     }
     
     // ========================================
-    // CADE TRACK (Additional)
+    // CADE TRACK REMOVED
     // ========================================
-    const cadeGroup = svg.append('g')
-      .attr('class', 'track track-cade')
-    
-    // Just show the empty track structure
-    cadeGroup.append('rect')
-      .attr('x', xOffset)
-      .attr('y', 0)
-      .attr('width', trackConfig.cade.width)
-      .attr('height', headerHeight)
-      .attr('fill', '#F0F0F0')
-      .attr('stroke', '#808080')
-    
-    cadeGroup.append('rect')
-      .attr('x', xOffset + 2)
-      .attr('y', 2)
-      .attr('width', trackConfig.cade.width - 4)
-      .attr('height', 16)
-      .attr('fill', '#FFFFFF')
-      .attr('stroke', '#C0C0C0')
-    
-    cadeGroup.append('text')
-      .attr('x', xOffset + trackConfig.cade.width / 2)
-      .attr('y', 13)
-      .attr('text-anchor', 'middle')
-      .attr('font-size', '9px')
-      .attr('font-weight', 'bold')
-      .text('CADE')
-    
-    cadeGroup.append('rect')
-      .attr('x', xOffset + 2)
-      .attr('y', 20)
-      .attr('width', trackConfig.cade.width - 4)
-      .attr('height', 16)
-      .attr('fill', '#FFFFFF')
-      .attr('stroke', '#C0C0C0')
-    
-    cadeGroup.append('text')
-      .attr('x', xOffset + trackConfig.cade.width / 2)
-      .attr('y', 31)
-      .attr('text-anchor', 'middle')
-      .attr('font-size', '8px')
-      .text('90 Mil 130')
-    
-    drawTrackBackground(cadeGroup, xOffset, trackConfig.cade.width, headerHeight, plotHeight)
     
   }, [curveData, wellData, settings, dimensions, trackConfig])
   

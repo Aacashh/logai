@@ -20,7 +20,7 @@ function App() {
   const [settings, setSettings] = useState({
     scale: 500,
     smoothing: 0,
-    showGrFill: false,
+    showGrFill: true,
     showDnCrossover: true,
     depthRange: { start: null, end: null },
     trackSettings: {
@@ -49,9 +49,14 @@ function App() {
         }
       }))
       
-      // Fetch curve data
-      const curves = await getWellCurves(data.well_id)
-      setCurveData(curves)
+      // Use curve data from upload response directly (no second API call!)
+      if (data.curve_data) {
+        setCurveData(data.curve_data)
+      } else {
+        // Fallback to fetching if not included (backwards compatibility)
+        const curves = await getWellCurves(data.well_id)
+        setCurveData(curves)
+      }
       
     } catch (err) {
       setError(err.message || 'Failed to upload file')
@@ -142,14 +147,14 @@ function App() {
               {!wellData ? (
                 <WelcomeScreen />
               ) : (
-                <>
+                <div className="view-content">
                   {/* Well Header Info */}
                   <WellHeader 
                     headerInfo={wellData.header}
                     depthUnit={wellData.depth_unit}
                   />
                   
-                  {/* Log Display */}
+                  {/* Log Display - Scrollable Container */}
                   <div className="log-viewport">
                     <LogViewer
                       wellData={wellData}
@@ -158,7 +163,7 @@ function App() {
                       loading={loading}
                     />
                   </div>
-                </>
+                </div>
               )}
             </div>
           </div>

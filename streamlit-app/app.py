@@ -305,7 +305,7 @@ if uploaded_file:
             if show_raw:
                 st.markdown("---")
                 st.markdown("**Raw Data Sample:**")
-                st.dataframe(df.head(20), use_container_width=True)
+                st.dataframe(df.head(20), width='stretch')
         
         # Calculate estimated plot height
         est_height_in = ((end_depth - start_depth) * 100) / scale_ratio / 2.54
@@ -337,7 +337,7 @@ if uploaded_file:
                     data=png_data,
                     file_name=f"{header_info['WELL']}_log.png",
                     mime="image/png",
-                    use_container_width=True
+                    width="stretch"
                 )
             
             with col2:
@@ -348,7 +348,7 @@ if uploaded_file:
                     data=png_hires,
                     file_name=f"{header_info['WELL']}_log_hires.png",
                     mime="image/png",
-                    use_container_width=True
+                    width="stretch"
                 )
             
             with col3:
@@ -359,7 +359,7 @@ if uploaded_file:
                     data=pdf_data,
                     file_name=f"{header_info['WELL']}_log.pdf",
                     mime="application/pdf",
-                    use_container_width=True
+                    width="stretch"
                 )
             
             with col4:
@@ -370,7 +370,7 @@ if uploaded_file:
                     data=las_data,
                     file_name=f"{header_info['WELL']}_export.las",
                     mime="text/plain",
-                    use_container_width=True
+                    width="stretch"
                 )
             
             # Close the figure to free memory

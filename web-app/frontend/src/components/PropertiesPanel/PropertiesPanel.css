@@ -1,10 +1,4 @@
 /* Properties Panel - WellCAD Style */
-.properties-panel {
-  display: flex;
-  flex-direction: column;
-  height: 100%;
-  background: var(--color-surface-light);
-}
 
 .properties-header {
   background: linear-gradient(to bottom, #FFFFFF, #E8E8E8);
@@ -15,6 +9,7 @@
   display: flex;
   align-items: center;
   gap: var(--spacing-2);
+  flex-shrink: 0;
 }
 
 .properties-header-icon {
@@ -26,17 +21,21 @@
 .properties-search {
   padding: var(--spacing-2);
   border-bottom: 1px solid var(--color-border);
+  flex-shrink: 0;
 }
 
 .properties-search input {
   width: 100%;
   padding: var(--spacing-1) var(--spacing-2);
   font-size: var(--font-size-xs);
+  border: 1px solid var(--color-border);
+  border-radius: 2px;
 }
 
 .properties-content {
   flex: 1;
   overflow-y: auto;
+  min-height: 0; /* Critical: allows flex child to shrink and enable scrolling */
 }
 
 /* Property Sections */
@@ -51,10 +50,40 @@
   font-weight: 600;
   color: var(--color-text);
   cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-1);
+  user-select: none;
+  border: none;
+  width: 100%;
+  text-align: left;
 }
 
 .property-section-header:hover {
   background: var(--color-surface-hover);
+}
+
+/* Arrow icon for collapsible sections */
+.section-arrow {
+  display: inline-block;
+  width: 12px;
+  font-size: 10px;
+  transition: transform 0.2s ease;
+  flex-shrink: 0;
+}
+
+.section-arrow.collapsed {
+  transform: rotate(-90deg);
+}
+
+/* Collapsible content */
+.property-section-content {
+  overflow: hidden;
+  transition: max-height 0.2s ease;
+}
+
+.property-section-content.collapsed {
+  display: none;
 }
 
 .property-subsection {
@@ -66,6 +95,14 @@
   font-size: var(--font-size-xs);
   color: var(--color-text-secondary);
   cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-1);
+  user-select: none;
+}
+
+.property-subsection-header:hover {
+  background: var(--color-menu-hover);
 }
 
 /* Property Grid */
@@ -110,6 +147,8 @@
   min-width: 0;
   padding: var(--spacing-1);
   font-size: var(--font-size-xs);
+  border: 1px solid var(--color-border);
+  border-radius: 2px;
 }
 
 /* Color picker */
@@ -126,4 +165,6 @@
   width: 13px;
   height: 13px;
   margin: 0;
+  cursor: pointer;
 }
+

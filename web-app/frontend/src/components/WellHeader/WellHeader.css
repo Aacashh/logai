@@ -4,6 +4,9 @@
   border: 1px solid var(--color-border);
   padding: var(--spacing-2) var(--spacing-3);
   font-size: var(--font-size-sm);
+  flex-shrink: 0;
+  min-height: 100px;
+  box-sizing: border-box;
 }
 
 .well-header-main {

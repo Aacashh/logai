@@ -23,7 +23,7 @@ TRACK_CONFIG = {
     'DEPTH': {
         'track': 0,
         'name': 'Measured Depth',
-        'unit': 'ft',
+        'unit': 'm',
         'color': None,
         'min': None,
         'max': None,
@@ -35,18 +35,18 @@ TRACK_CONFIG = {
         'name': 'Gamma Ray',
         'unit': 'gAPI',
         'color': '#00AA00',  # Green
-        'min': 25,
-        'max': 125,
+        'min': 0,
+        'max': 150,
         'scale': 'linear',
         'line_style': 'solid',
     },
     'RES_DEEP': {
         'track': 2,
-        'name': 'Resistivity',
+        'name': 'Resistivity Deep',
         'unit': 'ohm.m',
-        'color': '#CC0000',  # Red
+        'color': '#0000FF',  # Blue
         'min': 0.2,
-        'max': 200,
+        'max': 2000,
         'scale': 'log',
         'line_style': 'solid',
     },
@@ -54,7 +54,7 @@ TRACK_CONFIG = {
         'track': 3,
         'name': 'Neutron Porosity',
         'unit': 'v/v',
-        'color': '#0066CC',  # Blue
+        'color': '#0000FF',  # Blue
         'min': -0.15,
         'max': 0.45,
         'scale': 'linear',
@@ -64,9 +64,9 @@ TRACK_CONFIG = {
         'track': 3,
         'name': 'Bulk Density',
         'unit': 'g/cc',
-        'color': '#CC0000',  # Red
-        'min': 1.85,
-        'max': 2.85,
+        'color': '#FF0000',  # Red
+        'min': 1.95,
+        'max': 2.95,
         'scale': 'linear',
         'line_style': 'solid',
     },
@@ -162,9 +162,17 @@ def create_track_layout(mapping):
     if mapping['RES_DEEP']:
         res_curves.append({'name': mapping['RES_DEEP'], 'config': TRACK_CONFIG['RES_DEEP']})
     if mapping['RES_MED']:
-        res_curves.append({'name': mapping['RES_MED'], 'config': {**TRACK_CONFIG['RES_DEEP'], 'color': '#FF6600'}})
+        # Medium Resistivity -> Red
+        med_config = TRACK_CONFIG['RES_DEEP'].copy()
+        med_config['name'] = 'Resistivity Medium'
+        med_config['color'] = '#FF0000' # Red
+        res_curves.append({'name': mapping['RES_MED'], 'config': med_config})
     if mapping['RES_SHAL']:
-        res_curves.append({'name': mapping['RES_SHAL'], 'config': {**TRACK_CONFIG['RES_DEEP'], 'color': '#FF9900'}})
+        # Shallow Resistivity -> Orange
+        shal_config = TRACK_CONFIG['RES_DEEP'].copy()
+        shal_config['name'] = 'Resistivity Shallow'
+        shal_config['color'] = '#FFA500' # Orange
+        res_curves.append({'name': mapping['RES_SHAL'], 'config': shal_config})
     
     if res_curves:
         tracks.append({

@@ -40,7 +40,7 @@ def upload_las():
     Upload a LAS file.
     
     Returns:
-        JSON with well_id and basic metadata
+        JSON with well_id, metadata, AND initial curve data (for faster first render)
     """
     if 'file' not in request.files:
         return jsonify({'error': 'No file provided'}), 400
@@ -85,6 +85,13 @@ def upload_las():
             'df': df
         }
         
+        # Get initial curve data for the first view (first 500 units or full range)
+        initial_end = min(min_depth + 500, max_depth)
+        initial_df = filter_by_depth(df, min_depth, initial_end)
+        initial_curves = df_to_json(initial_df)
+        initial_curves['depth_unit'] = depth_unit
+        initial_curves['mapping'] = mapping
+        
         return jsonify({
             'well_id': well_id,
             'filename': file.filename,
@@ -93,7 +100,9 @@ def upload_las():
             'depth_range': {'min': min_depth, 'max': max_depth},
             'curves': available_curves,
             'mapping': mapping,
-            'track_layout': track_layout
+            'track_layout': track_layout,
+            # Include initial curve data to avoid second API call
+            'curve_data': initial_curves
         })
     
     except Exception as e:
@@ -157,6 +166,7 @@ def get_curves(well_id):
         start_depth: Start depth (optional)
         end_depth: End depth (optional)
         smooth: Smoothing window (optional)
+        max_points: Maximum data points to return (optional, default 5000)
     """
     if well_id not in wells_storage:
         return jsonify({'error': 'Well not found'}), 404
@@ -171,10 +181,19 @@ def get_curves(well_id):
     if start_depth is not None and end_depth is not None:
         df = filter_by_depth(df, start_depth, end_depth)
     
+    # Downsample if too many points (improves transfer and rendering performance)
+    max_points = request.args.get('max_points', default=5000, type=int)
+    if len(df) > max_points:
+        # Use every nth sample to reduce data size while preserving shape
+        step = len(df) // max_points
+        df = df.iloc[::step].copy()
+    
     # Convert to JSON format
     result = df_to_json(df)
     result['depth_unit'] = data['depth_unit']
     result['mapping'] = data['mapping']
+    result['total_points'] = len(df)
+    result['downsampled'] = len(df) < len(data['df'])
     
     return jsonify(result)
 

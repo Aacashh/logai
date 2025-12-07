@@ -115,15 +115,20 @@ def get_available_curves(las):
     Returns:
         List of dictionaries with curve info
     """
+    import numpy as np
     curves = []
     for curve in las.curves:
+        # Use numpy's nanmin/nanmax for faster computation
+        data = curve.data
+        valid_count = np.count_nonzero(~np.isnan(data)) if len(data) > 0 else 0
         curves.append({
             'mnemonic': curve.mnemonic,
             'unit': curve.unit,
             'description': curve.descr,
             'data_range': {
-                'min': float(curve.data[~pd.isna(curve.data)].min()) if len(curve.data[~pd.isna(curve.data)]) > 0 else None,
-                'max': float(curve.data[~pd.isna(curve.data)].max()) if len(curve.data[~pd.isna(curve.data)]) > 0 else None
+                'min': float(np.nanmin(data)) if valid_count > 0 else None,
+                'max': float(np.nanmax(data)) if valid_count > 0 else None
             }
         })
     return curves
+
