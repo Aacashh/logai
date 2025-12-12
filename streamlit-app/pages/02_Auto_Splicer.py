@@ -1,12 +1,13 @@
 """
 WellLog Analyzer Pro - Auto Splicer Page
-One-click batch auto-splicing with automatic unit conversion.
+Multi-well batch auto-splicing with automatic unit conversion.
 
 This is the "Black Box" interface that:
-1. Accepts multiple LAS files
-2. Auto-detects and converts units (Feet → Meters)
-3. Sorts files by depth
-4. Chain-splices into a single composite log
+1. Accepts multiple LAS files (potentially from different wells)
+2. Groups files by well name
+3. Lets user select target well
+4. Auto-detects and converts units (Feet → Meters)
+5. Chain-splices into a single composite log
 """
 
 import streamlit as st
@@ -23,12 +24,13 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 from shared.splicing import (
-    preprocess_las_files,
+    group_files_by_well,
     batch_splice_pipeline,
     find_common_curves,
     get_recommended_correlation_curve,
     PreprocessedLAS,
     BatchSpliceResult,
+    WellGroupResult,
     DEFAULT_GRID_STEP,
     DEFAULT_SEARCH_WINDOW,
     DEFAULT_DTW_WINDOW,
@@ -174,6 +176,50 @@ st.markdown("""
         background: linear-gradient(135deg, #1e3a5f 0%, #0f172a 100%);
     }
     
+    .well-selector-card {
+        background: linear-gradient(135deg, #1e293b 0%, #0f172a 100%);
+        border: 1px solid #475569;
+        border-radius: 16px;
+        padding: 1.5rem;
+        margin: 1rem 0;
+    }
+    
+    .well-info-grid {
+        display: grid;
+        grid-template-columns: repeat(3, 1fr);
+        gap: 1rem;
+        margin-top: 1rem;
+    }
+    
+    .well-stat {
+        background: #334155;
+        padding: 1rem;
+        border-radius: 8px;
+        text-align: center;
+    }
+    
+    .well-stat-value {
+        font-size: 1.5rem;
+        font-weight: 700;
+        color: #22d3ee;
+        font-family: 'JetBrains Mono', monospace;
+    }
+    
+    .well-stat-label {
+        font-size: 0.8rem;
+        color: #94a3b8;
+        margin-top: 0.25rem;
+    }
+    
+    .duplicate-warning {
+        background: linear-gradient(135deg, #78350f 0%, #92400e 100%);
+        border-left: 4px solid #fbbf24;
+        padding: 1rem;
+        border-radius: 0 8px 8px 0;
+        margin: 0.5rem 0;
+        color: #fef3c7;
+    }
+    
     /* Hide streamlit branding */
     #MainMenu {visibility: hidden;}
     footer {visibility: hidden;}
@@ -203,7 +249,7 @@ st.markdown("""
 st.markdown("""
 <div class="main-header">
     <div class="main-title">⚡ Auto Splicer</div>
-    <div class="main-subtitle">One-Click Batch Splicing • Automatic Unit Conversion • Zero Manual Selection</div>
+    <div class="main-subtitle">Multi-Well Support • Automatic Unit Conversion • Intelligent Grouping</div>
 </div>
 """, unsafe_allow_html=True)
 
@@ -302,57 +348,42 @@ def create_composite_plot(composite_df: pd.DataFrame, correlation_curve: str,
     axes[0].set_ylim(depth_max, depth_min)  # Inverted
     axes[0].set_ylabel("Depth (m)", fontsize=11, fontweight='bold', color='#e2e8f0')
     
-    # Add splice point markers
-    for entry in file_summary[1:]:
-        if 'Spliced' in entry.get('action', ''):
-            # Extract splice info and mark
-            pass
-    
     fig.suptitle(f'Composite Log: {depth_min:.1f}m - {depth_max:.1f}m', 
                  fontsize=14, fontweight='bold', y=0.98, color='#22d3ee')
     
     return fig
 
 
-def create_file_summary_table(file_summary: list) -> str:
-    """Create an HTML table showing file processing summary."""
+def create_file_summary_dataframe(file_summary: list) -> pd.DataFrame:
+    """Create a pandas DataFrame showing file processing summary."""
     rows = []
     for entry in file_summary:
-        unit_badge = '🔵' if entry['original_unit'] == 'm' else '🟠'
-        rows.append(f"""
-        <tr>
-            <td style="padding: 8px; border-bottom: 1px solid #334155;">{entry['filename']}</td>
-            <td style="padding: 8px; border-bottom: 1px solid #334155; text-align: center;">
-                {unit_badge} {entry['original_unit'].upper()}
-            </td>
-            <td style="padding: 8px; border-bottom: 1px solid #334155; text-align: right;">
-                {entry['start_m']:.1f}
-            </td>
-            <td style="padding: 8px; border-bottom: 1px solid #334155; text-align: right;">
-                {entry['stop_m']:.1f}
-            </td>
-            <td style="padding: 8px; border-bottom: 1px solid #334155;">{entry['action']}</td>
-        </tr>
-        """)
+        unit_badge = '🔵 M' if entry['original_unit'] == 'm' else '🟠 FT'
+        rows.append({
+            'File Name': entry['filename'],
+            'Unit': unit_badge,
+            'Start (m)': f"{entry['start_m']:.1f}",
+            'End (m)': f"{entry['stop_m']:.1f}",
+            'Action': entry['action']
+        })
     
-    return f"""
-    <div style="background: #1e293b; border-radius: 12px; padding: 1rem; overflow-x: auto;">
-        <table style="width: 100%; border-collapse: collapse; color: #e2e8f0; font-size: 0.9rem;">
-            <thead>
-                <tr style="background: #0f172a;">
-                    <th style="padding: 12px 8px; text-align: left; border-bottom: 2px solid #22d3ee;">File Name</th>
-                    <th style="padding: 12px 8px; text-align: center; border-bottom: 2px solid #22d3ee;">Unit</th>
-                    <th style="padding: 12px 8px; text-align: right; border-bottom: 2px solid #22d3ee;">Start (m)</th>
-                    <th style="padding: 12px 8px; text-align: right; border-bottom: 2px solid #22d3ee;">End (m)</th>
-                    <th style="padding: 12px 8px; text-align: left; border-bottom: 2px solid #22d3ee;">Action</th>
-                </tr>
-            </thead>
-            <tbody>
-                {''.join(rows)}
-            </tbody>
-        </table>
-    </div>
-    """
+    return pd.DataFrame(rows)
+
+
+def create_well_files_dataframe(files: list) -> pd.DataFrame:
+    """Create a pandas DataFrame showing files for a selected well."""
+    rows = []
+    for f in files:
+        unit_badge = '🔵 M' if f.original_unit == 'm' else '🟠 FT'
+        rows.append({
+            'File Name': f.filename,
+            'Unit': unit_badge,
+            'Start (m)': f"{f.start_depth:.1f}",
+            'End (m)': f"{f.stop_depth:.1f}",
+            'Curves': len(f.curves)
+        })
+    
+    return pd.DataFrame(rows)
 
 
 # =============================================================================
@@ -397,17 +428,17 @@ with st.sidebar:
     
     **Automatic Pipeline:**
     
-    1. **Unit Detection**
+    1. **Well Detection**
+       - Reads WELL header
+       - Groups files by well name
+    
+    2. **Unit Detection**
        - Reads STRT.FT / STRT.M
        - Converts all to Meters
     
-    2. **Null Stripping**
-       - Removes -999.25 padding
-       - Finds valid data bounds
-    
-    3. **Depth Sorting**
-       - Orders by start depth
-       - Shallowest first
+    3. **Duplicate Detection**
+       - Fingerprints files
+       - Skips identical duplicates
     
     4. **Chain Splicing**
        - Gap > 5m: Append
@@ -416,11 +447,11 @@ with st.sidebar:
 
 
 # =============================================================================
-# MAIN INTERFACE
+# MAIN INTERFACE - STEP 1: UPLOAD & GROUP
 # =============================================================================
 
-st.markdown("## 📤 Upload All Logging Runs")
-st.markdown("*Drop all your LAS files at once. The system handles everything automatically.*")
+st.markdown("## Step 1: Upload All Logging Runs")
+st.markdown("*Drop all your LAS files at once. Files from different wells will be automatically grouped.*")
 
 # File uploader
 uploaded_files = st.file_uploader(
@@ -428,7 +459,7 @@ uploaded_files = st.file_uploader(
     type=['las', 'LAS'],
     accept_multiple_files=True,
     help="Upload 2 or more LAS files from different logging runs. "
-         "They can be in any order and with mixed units (Feet/Meters).",
+         "They can be from different wells - the system will group them automatically.",
     label_visibility="collapsed"
 )
 
@@ -436,264 +467,380 @@ if uploaded_files:
     if len(uploaded_files) < 2:
         st.warning("⚠️ Please upload at least 2 LAS files for splicing.")
     else:
-        # Process automatically when files are uploaded
-        st.markdown("---")
-        
-        # Progress messages storage
-        progress_messages = []
-        
-        def capture_progress(step, msg):
-            progress_messages.append((step, msg))
-        
         # =================================================================
-        # STEP 1: PREPROCESSING
+        # SCAN & GROUP FILES BY WELL
         # =================================================================
-        with st.status("🔄 Processing files...", expanded=True) as status:
+        
+        # Only re-process if files changed
+        file_names_hash = hash(tuple(f.name for f in uploaded_files))
+        
+        if ('well_groups_hash' not in st.session_state or 
+            st.session_state.get('well_groups_hash') != file_names_hash):
             
-            st.markdown("""
-            <div class="pipeline-step">
-                <h4>Step 1: Unit Standardization</h4>
-                <p>Detecting units and converting to Meters...</p>
-            </div>
-            """, unsafe_allow_html=True)
-            
-            try:
-                # Preprocess files
-                preprocessed = preprocess_las_files(
+            with st.spinner("🔍 Scanning files and detecting wells..."):
+                progress_messages = []
+                
+                def capture_progress(step, msg):
+                    progress_messages.append((step, msg))
+                
+                group_result = group_files_by_well(
                     uploaded_files,
                     progress_callback=capture_progress
                 )
                 
-                if len(preprocessed) == 0:
-                    st.error("❌ No valid LAS files could be processed.")
-                    st.stop()
+                st.session_state['well_groups'] = group_result.well_groups
+                st.session_state['duplicate_warnings'] = group_result.duplicate_warnings
+                st.session_state['num_wells'] = group_result.num_wells
+                st.session_state['num_files_total'] = group_result.num_files_total
+                st.session_state['well_groups_hash'] = file_names_hash
                 
-                # Display preprocessing results
-                st.markdown(f"✅ **Detected {len(preprocessed)} files. All units normalized to Meters.**")
-                
-                # Show file summary table
-                preprocessing_summary = []
-                for p in preprocessed:
-                    preprocessing_summary.append({
-                        'filename': p.filename,
-                        'original_unit': p.original_unit,
-                        'start_m': p.start_depth,
-                        'stop_m': p.stop_depth,
-                        'action': 'Preprocessed'
-                    })
-                
-                st.markdown(create_file_summary_table(preprocessing_summary), unsafe_allow_html=True)
-                
-                # =============================================================
-                # STEP 2: INTELLIGENT SPLICING
-                # =============================================================
-                st.markdown("""
-                <div class="pipeline-step">
-                    <h4>Step 2: Intelligent Splicing</h4>
-                    <p>Running correlation analysis and chain splice algorithm...</p>
+                # Clear any previous results
+                if 'splice_result' in st.session_state:
+                    del st.session_state['splice_result']
+        
+        well_groups = st.session_state['well_groups']
+        duplicate_warnings = st.session_state['duplicate_warnings']
+        num_wells = st.session_state['num_wells']
+        num_files_total = st.session_state['num_files_total']
+        
+        # Display grouping summary
+        st.markdown("---")
+        
+        if num_wells == 0:
+            st.error("❌ No valid LAS files could be processed.")
+            st.stop()
+        
+        # Show duplicate warnings if any
+        if duplicate_warnings:
+            st.markdown("### ⚠️ Duplicate Files Detected")
+            for warning in duplicate_warnings:
+                st.markdown(f"""
+                <div class="duplicate-warning">
+                    {warning}
                 </div>
                 """, unsafe_allow_html=True)
-                
-                # Find common curves across all files
-                all_curves = [set(p.curves) for p in preprocessed]
-                common_curves = set.intersection(*all_curves) if all_curves else set()
-                common_curves = list(common_curves)
-                
-                if not common_curves:
-                    st.warning("⚠️ No common curves found across all files. Using first available curve.")
-                    # Use curves from first file
-                    common_curves = preprocessed[0].curves
-                
-                # Get recommended correlation curve
-                correlation_curve = get_recommended_correlation_curve(common_curves)
-                
-                if not correlation_curve:
-                    correlation_curve = common_curves[0] if common_curves else None
-                
-                if not correlation_curve:
-                    st.error("❌ No curves available for correlation.")
-                    st.stop()
-                
-                st.info(f"📊 Using **{correlation_curve}** for correlation alignment")
-                
-                # Progress bar for splicing
-                splice_progress = st.progress(0, text="Initializing splice pipeline...")
-                
-                # Run batch splicing
-                splice_messages = []
-                
-                def splice_progress_callback(step, msg):
-                    splice_messages.append(msg)
-                    # Update progress bar
-                    progress_pct = min(0.95, len(splice_messages) / (len(preprocessed) * 3))
-                    splice_progress.progress(progress_pct, text=msg)
-                
-                result = batch_splice_pipeline(
-                    preprocessed_files=preprocessed,
-                    correlation_curve=correlation_curve,
-                    grid_step=grid_step,
-                    max_search_meters=max_search,
-                    max_elastic_meters=max_elastic,
-                    progress_callback=splice_progress_callback
-                )
-                
-                splice_progress.progress(1.0, text="Splicing complete!")
-                
-                # Display splice log
-                st.markdown("**Splice Operations:**")
-                for log_entry in result.splice_log:
-                    if "Gap" in log_entry:
-                        st.write(f"🔗 {log_entry}")
-                    elif "overlap" in log_entry.lower():
-                        st.write(f"🧬 {log_entry}")
-                    else:
-                        st.write(f"📝 {log_entry}")
-                
-                # =============================================================
-                # STEP 3: RESULTS
-                # =============================================================
-                st.markdown("""
-                <div class="pipeline-step">
-                    <h4>Step 3: Composite Result</h4>
-                    <p>Your merged wellbore log is ready!</p>
-                </div>
-                """, unsafe_allow_html=True)
-                
-                status.update(label="✅ Auto-Splicing Complete!", state="complete")
-                
-                # Store results in session state
-                st.session_state['splice_result'] = result
-                st.session_state['correlation_curve'] = correlation_curve
-                
-            except Exception as e:
-                status.update(label="❌ Error during processing", state="error")
-                st.error(f"Error: {str(e)}")
-                st.exception(e)
-                st.stop()
         
-        # =================================================================
-        # RESULTS DISPLAY
-        # =================================================================
-        
-        if 'splice_result' in st.session_state:
-            result = st.session_state['splice_result']
-            correlation_curve = st.session_state['correlation_curve']
-            
-            # Success banner
+        # Summary metrics
+        col1, col2 = st.columns(2)
+        with col1:
             st.markdown(f"""
-            <div class="success-banner">
-                <h3>✅ Composite Log Created Successfully</h3>
-                <p>{result.num_files_processed} files merged into a single continuous log spanning 
-                {result.total_depth_range[0]:.1f}m to {result.total_depth_range[1]:.1f}m</p>
+            <div class="metric-card">
+                <div class="metric-value">{num_wells}</div>
+                <div class="metric-label">Unique Well{'s' if num_wells > 1 else ''} Detected</div>
+            </div>
+            """, unsafe_allow_html=True)
+        
+        with col2:
+            st.markdown(f"""
+            <div class="metric-card">
+                <div class="metric-value">{num_files_total}</div>
+                <div class="metric-label">Valid Files to Process</div>
+            </div>
+            """, unsafe_allow_html=True)
+        
+        # =================================================================
+        # STEP 2: WELL SELECTION
+        # =================================================================
+        
+        st.markdown("---")
+        st.markdown("## Step 2: Select Target Well")
+        
+        well_names = list(well_groups.keys())
+        
+        # Auto-select if only one well, otherwise show selector
+        if num_wells == 1:
+            selected_well = well_names[0]
+            st.info(f"📍 **Single well detected:** {selected_well} - automatically selected")
+        else:
+            st.markdown(f"*Detected **{num_wells} unique wells** in your upload. Select which one to analyze:*")
+            
+            selected_well = st.selectbox(
+                "Select Target Well",
+                options=well_names,
+                format_func=lambda x: f"{x} ({len(well_groups[x])} files)",
+                help="Choose the well you want to splice. Only files belonging to this well will be processed."
+            )
+        
+        # Display selected well metadata
+        if selected_well:
+            selected_files = well_groups[selected_well]
+            
+            # Calculate metadata
+            depth_min = min(f.start_depth for f in selected_files)
+            depth_max = max(f.stop_depth for f in selected_files)
+            total_depth = depth_max - depth_min
+            
+            # Get location from first file if available
+            location = selected_files[0].location if selected_files[0].location else "Not specified"
+            
+            st.markdown(f"""
+            <div class="well-selector-card">
+                <h3 style="color: #22d3ee; margin: 0 0 1rem 0;">📊 {selected_well}</h3>
+                <div class="well-info-grid">
+                    <div class="well-stat">
+                        <div class="well-stat-value">{len(selected_files)}</div>
+                        <div class="well-stat-label">Files</div>
+                    </div>
+                    <div class="well-stat">
+                        <div class="well-stat-value">{depth_min:.0f}m - {depth_max:.0f}m</div>
+                        <div class="well-stat-label">Depth Range</div>
+                    </div>
+                    <div class="well-stat">
+                        <div class="well-stat-value">{location[:20]}{'...' if len(location) > 20 else ''}</div>
+                        <div class="well-stat-label">Location</div>
+                    </div>
+                </div>
             </div>
             """, unsafe_allow_html=True)
             
-            # Metrics row
-            col1, col2, col3, col4 = st.columns(4)
-            
-            with col1:
-                st.markdown(f"""
-                <div class="metric-card">
-                    <div class="metric-value">{result.num_files_processed}</div>
-                    <div class="metric-label">Files Merged</div>
-                </div>
-                """, unsafe_allow_html=True)
-            
-            with col2:
-                total_depth = result.total_depth_range[1] - result.total_depth_range[0]
-                st.markdown(f"""
-                <div class="metric-card">
-                    <div class="metric-value">{total_depth:.0f}m</div>
-                    <div class="metric-label">Total Depth</div>
-                </div>
-                """, unsafe_allow_html=True)
-            
-            with col3:
-                st.markdown(f"""
-                <div class="metric-card">
-                    <div class="metric-value">{len(result.composite_df)}</div>
-                    <div class="metric-label">Data Points</div>
-                </div>
-                """, unsafe_allow_html=True)
-            
-            with col4:
-                num_curves = len([c for c in result.composite_df.columns if c != 'DEPTH'])
-                st.markdown(f"""
-                <div class="metric-card">
-                    <div class="metric-value">{num_curves}</div>
-                    <div class="metric-label">Curves</div>
-                </div>
-                """, unsafe_allow_html=True)
-            
-            st.markdown("---")
-            
-            # File summary table
-            st.markdown("### 📋 Processing Summary")
-            st.markdown(create_file_summary_table(result.file_summary), unsafe_allow_html=True)
-            
-            st.markdown("---")
-            
-            # Composite plot
-            st.markdown("### 📊 Composite Log Visualization")
-            
-            fig = create_composite_plot(
-                result.composite_df,
-                correlation_curve,
-                result.file_summary,
-                result.splice_log
-            )
-            
-            st.pyplot(fig)
-            
-            st.markdown("---")
-            
-            # Export options
-            st.markdown("### 💾 Export Composite Log")
-            
-            col1, col2, col3 = st.columns(3)
-            
-            with col1:
-                # Export as LAS
-                header_info = {
-                    'WELL': 'COMPOSITE_SPLICED',
-                    'STRT': result.total_depth_range[0],
-                    'STOP': result.total_depth_range[1],
-                    'STEP': np.median(np.diff(result.composite_df['DEPTH'].values))
-                }
-                
-                las_data = export_to_las(result.composite_df, header_info, 'm')
-                st.download_button(
-                    label="📋 Download Composite LAS",
-                    data=las_data,
-                    file_name="composite_spliced.las",
-                    mime="text/plain",
+            # Show files for this well
+            with st.expander(f"📁 Files for {selected_well}", expanded=False):
+                st.dataframe(
+                    create_well_files_dataframe(selected_files),
                     use_container_width=True,
-                    type="primary"
+                    hide_index=True
                 )
             
-            with col2:
-                # Export plot as PNG
-                png_data = export_plot_to_bytes(fig, format='png', dpi=150)
-                st.download_button(
-                    label="📷 Download Plot (PNG)",
-                    data=png_data,
-                    file_name="composite_log.png",
-                    mime="image/png",
-                    use_container_width=True
-                )
+            # Store selected well
+            st.session_state['selected_well'] = selected_well
             
-            with col3:
-                # Export as CSV
-                csv_data = result.composite_df.to_csv(index=False)
-                st.download_button(
-                    label="📊 Download CSV",
-                    data=csv_data,
-                    file_name="composite_data.csv",
-                    mime="text/csv",
-                    use_container_width=True
-                )
+            # =================================================================
+            # STEP 3: EXECUTION
+            # =================================================================
             
-            plt.close(fig)
+            st.markdown("---")
+            st.markdown("## Step 3: Run Splicing Pipeline")
+            
+            # Execution button
+            if st.button(f"⚡ Analyze '{selected_well}'", type="primary", use_container_width=True):
+                
+                with st.status("🔄 Processing files...", expanded=True) as status:
+                    
+                    # Step 3a: Show normalization info
+                    st.markdown("""
+                    <div class="pipeline-step">
+                        <h4>Stage 1: Unit Normalization</h4>
+                        <p>Converting all files to meters, stripping null padding...</p>
+                    </div>
+                    """, unsafe_allow_html=True)
+                    
+                    # Files are already preprocessed in well_groups
+                    preprocessed = selected_files
+                    
+                    st.markdown(f"✅ **{len(preprocessed)} files normalized to meters**")
+                    
+                    # Step 3b: Find correlation curve
+                    st.markdown("""
+                    <div class="pipeline-step">
+                        <h4>Stage 2: Correlation Analysis</h4>
+                        <p>Finding common curves and running cross-correlation...</p>
+                    </div>
+                    """, unsafe_allow_html=True)
+                    
+                    # Find common curves across all files for this well
+                    all_curves = [set(p.curves) for p in preprocessed]
+                    common_curves = set.intersection(*all_curves) if all_curves else set()
+                    common_curves = list(common_curves)
+                    
+                    if not common_curves:
+                        st.warning("⚠️ No common curves found across all files. Using first available curve.")
+                        common_curves = preprocessed[0].curves
+                    
+                    correlation_curve = get_recommended_correlation_curve(common_curves)
+                    
+                    if not correlation_curve:
+                        correlation_curve = common_curves[0] if common_curves else None
+                    
+                    if not correlation_curve:
+                        st.error("❌ No curves available for correlation.")
+                        status.update(label="❌ Error: No correlation curve", state="error")
+                        st.stop()
+                    
+                    st.info(f"📊 Using **{correlation_curve}** for correlation alignment")
+                    
+                    # Step 3c: DTW Alignment
+                    st.markdown("""
+                    <div class="pipeline-step">
+                        <h4>Stage 3: DTW Elastic Warping</h4>
+                        <p>Applying constrained Dynamic Time Warping for fine alignment...</p>
+                    </div>
+                    """, unsafe_allow_html=True)
+                    
+                    # Progress bar for splicing
+                    splice_progress = st.progress(0, text="Initializing splice pipeline...")
+                    
+                    # Run batch splicing
+                    splice_messages = []
+                    
+                    def splice_progress_callback(step, msg):
+                        splice_messages.append(msg)
+                        progress_pct = min(0.95, len(splice_messages) / (len(preprocessed) * 3))
+                        splice_progress.progress(progress_pct, text=msg)
+                    
+                    try:
+                        result = batch_splice_pipeline(
+                            preprocessed_files=preprocessed,
+                            correlation_curve=correlation_curve,
+                            grid_step=grid_step,
+                            max_search_meters=max_search,
+                            max_elastic_meters=max_elastic,
+                            progress_callback=splice_progress_callback
+                        )
+                        
+                        splice_progress.progress(1.0, text="Splicing complete!")
+                        
+                        # Display splice operations
+                        st.markdown("**Splice Operations:**")
+                        for log_entry in result.splice_log:
+                            if "Gap" in log_entry:
+                                st.write(f"🔗 {log_entry}")
+                            elif "overlap" in log_entry.lower():
+                                st.write(f"🧬 {log_entry}")
+                            else:
+                                st.write(f"📝 {log_entry}")
+                        
+                        status.update(label="✅ Auto-Splicing Complete!", state="complete")
+                        
+                        # Store results in session state
+                        st.session_state['splice_result'] = result
+                        st.session_state['correlation_curve'] = correlation_curve
+                        st.session_state['processed_well'] = selected_well
+                        
+                    except Exception as e:
+                        status.update(label="❌ Error during processing", state="error")
+                        st.error(f"Error: {str(e)}")
+                        st.exception(e)
+                        st.stop()
+            
+            # =================================================================
+            # RESULTS DISPLAY (if available)
+            # =================================================================
+            
+            if 'splice_result' in st.session_state and st.session_state.get('processed_well') == selected_well:
+                result = st.session_state['splice_result']
+                correlation_curve = st.session_state['correlation_curve']
+                
+                st.markdown("---")
+                
+                # Success banner
+                st.markdown(f"""
+                <div class="success-banner">
+                    <h3>✅ Composite Log Created Successfully</h3>
+                    <p><strong>{selected_well}</strong>: {result.num_files_processed} files merged into a single continuous log spanning 
+                    {result.total_depth_range[0]:.1f}m to {result.total_depth_range[1]:.1f}m</p>
+                </div>
+                """, unsafe_allow_html=True)
+                
+                # Metrics row
+                col1, col2, col3, col4 = st.columns(4)
+                
+                with col1:
+                    st.markdown(f"""
+                    <div class="metric-card">
+                        <div class="metric-value">{result.num_files_processed}</div>
+                        <div class="metric-label">Files Merged</div>
+                    </div>
+                    """, unsafe_allow_html=True)
+                
+                with col2:
+                    total_depth = result.total_depth_range[1] - result.total_depth_range[0]
+                    st.markdown(f"""
+                    <div class="metric-card">
+                        <div class="metric-value">{total_depth:.0f}m</div>
+                        <div class="metric-label">Total Depth</div>
+                    </div>
+                    """, unsafe_allow_html=True)
+                
+                with col3:
+                    st.markdown(f"""
+                    <div class="metric-card">
+                        <div class="metric-value">{len(result.composite_df)}</div>
+                        <div class="metric-label">Data Points</div>
+                    </div>
+                    """, unsafe_allow_html=True)
+                
+                with col4:
+                    num_curves = len([c for c in result.composite_df.columns if c != 'DEPTH'])
+                    st.markdown(f"""
+                    <div class="metric-card">
+                        <div class="metric-value">{num_curves}</div>
+                        <div class="metric-label">Curves</div>
+                    </div>
+                    """, unsafe_allow_html=True)
+                
+                st.markdown("---")
+                
+                # File summary table
+                st.markdown("### 📋 Processing Summary")
+                st.dataframe(
+                    create_file_summary_dataframe(result.file_summary),
+                    use_container_width=True,
+                    hide_index=True
+                )
+                
+                st.markdown("---")
+                
+                # Composite plot
+                st.markdown("### 📊 Composite Log Visualization")
+                
+                fig = create_composite_plot(
+                    result.composite_df,
+                    correlation_curve,
+                    result.file_summary,
+                    result.splice_log
+                )
+                
+                st.pyplot(fig)
+                
+                st.markdown("---")
+                
+                # Export options
+                st.markdown("### 💾 Export Composite Log")
+                
+                col1, col2, col3 = st.columns(3)
+                
+                with col1:
+                    # Export as LAS
+                    header_info = {
+                        'WELL': f'{selected_well}_COMPOSITE',
+                        'STRT': result.total_depth_range[0],
+                        'STOP': result.total_depth_range[1],
+                        'STEP': np.median(np.diff(result.composite_df['DEPTH'].values))
+                    }
+                    
+                    las_data = export_to_las(result.composite_df, header_info, 'm')
+                    st.download_button(
+                        label="📋 Download Composite LAS",
+                        data=las_data,
+                        file_name=f"{selected_well.replace(' ', '_')}_composite.las",
+                        mime="text/plain",
+                        use_container_width=True,
+                        type="primary"
+                    )
+                
+                with col2:
+                    # Export plot as PNG
+                    png_data = export_plot_to_bytes(fig, format='png', dpi=150)
+                    st.download_button(
+                        label="📷 Download Plot (PNG)",
+                        data=png_data,
+                        file_name=f"{selected_well.replace(' ', '_')}_composite.png",
+                        mime="image/png",
+                        use_container_width=True
+                    )
+                
+                with col3:
+                    # Export as CSV
+                    csv_data = result.composite_df.to_csv(index=False)
+                    st.download_button(
+                        label="📊 Download CSV",
+                        data=csv_data,
+                        file_name=f"{selected_well.replace(' ', '_')}_composite.csv",
+                        mime="text/csv",
+                        use_container_width=True
+                    )
+                
+                plt.close(fig)
 
 else:
     # Welcome screen when no files uploaded
@@ -703,17 +850,18 @@ else:
                 border: 2px dashed #475569; margin-top: 2rem;">
         <div style="font-size: 5rem; margin-bottom: 1.5rem;">⚡</div>
         <h2 style="color: #22d3ee; margin-bottom: 1rem; font-size: 1.8rem;">
-            One-Click Batch Auto-Splicing
+            Multi-Well Batch Auto-Splicing
         </h2>
         <p style="color: #94a3b8; font-size: 1.1rem; max-width: 600px; margin: 0 auto 2rem auto; line-height: 1.6;">
-            Upload all your logging runs at once. The system automatically handles 
-            unit conversion, depth sorting, and intelligent splicing.
+            Upload LAS files from <strong>any number of wells</strong>. The system automatically 
+            groups them by well name, lets you select which well to analyze, and handles 
+            unit conversion and intelligent splicing.
         </p>
         <div style="display: flex; justify-content: center; gap: 2rem; flex-wrap: wrap; margin-top: 2rem;">
             <div style="text-align: left; color: #e2e8f0;">
-                <p style="margin: 0.5rem 0;">✓ Auto-detect Feet vs Meters</p>
-                <p style="margin: 0.5rem 0;">✓ Strip null padding (-999.25)</p>
-                <p style="margin: 0.5rem 0;">✓ Sort by depth automatically</p>
+                <p style="margin: 0.5rem 0;">✓ Auto-detect wells by name</p>
+                <p style="margin: 0.5rem 0;">✓ Skip duplicate files</p>
+                <p style="margin: 0.5rem 0;">✓ Convert Feet to Meters</p>
             </div>
             <div style="text-align: left; color: #e2e8f0;">
                 <p style="margin: 0.5rem 0;">✓ Handle gaps and overlaps</p>
@@ -733,11 +881,11 @@ else:
     with col1:
         st.markdown("""
         <div style="background: #1e293b; padding: 1.5rem; border-radius: 12px; height: 100%;">
-            <h4 style="color: #22d3ee; margin-bottom: 1rem;">1️⃣ Standardization</h4>
+            <h4 style="color: #22d3ee; margin-bottom: 1rem;">1️⃣ Scan & Group</h4>
             <p style="color: #94a3b8; font-size: 0.9rem;">
-                Each file is analyzed for depth units (STRT.FT vs STRT.M). 
-                All data is converted to meters using the standard conversion factor (0.3048).
-                Null padding rows are stripped from top and bottom.
+                Each file is scanned for the WELL header field. Files are grouped 
+                by well name (sanitized to handle variations like "Griffyn #2" vs " griffyn #2 ").
+                Duplicate files are automatically detected and skipped.
             </p>
         </div>
         """, unsafe_allow_html=True)
@@ -745,12 +893,11 @@ else:
     with col2:
         st.markdown("""
         <div style="background: #1e293b; padding: 1.5rem; border-radius: 12px; height: 100%;">
-            <h4 style="color: #22d3ee; margin-bottom: 1rem;">2️⃣ Intelligent Merge</h4>
+            <h4 style="color: #22d3ee; margin-bottom: 1rem;">2️⃣ Select Well</h4>
             <p style="color: #94a3b8; font-size: 0.9rem;">
-                Files are sorted by start depth. The chain-splice algorithm processes each pair:
-                <br><br>
-                • <b>Gap > 5m:</b> Simple append with NaN fill<br>
-                • <b>Overlap:</b> Cross-correlation finds shift, DTW handles elastic warp
+                If multiple wells are detected, you choose which one to analyze.
+                The system shows metadata for each well: file count, depth range, 
+                and location. Single-well uploads are auto-selected.
             </p>
         </div>
         """, unsafe_allow_html=True)
@@ -758,12 +905,11 @@ else:
     with col3:
         st.markdown("""
         <div style="background: #1e293b; padding: 1.5rem; border-radius: 12px; height: 100%;">
-            <h4 style="color: #22d3ee; margin-bottom: 1rem;">3️⃣ Export</h4>
+            <h4 style="color: #22d3ee; margin-bottom: 1rem;">3️⃣ Splice & Export</h4>
             <p style="color: #94a3b8; font-size: 0.9rem;">
-                The final composite log contains all curves from all files, 
-                properly aligned and merged. Export as LAS, PNG, or CSV 
-                for further analysis or reporting.
+                Only the selected well's files are processed through the 
+                chain-splice algorithm (correlation + DTW). Export the 
+                composite log as LAS, PNG, or CSV.
             </p>
         </div>
         """, unsafe_allow_html=True)
-
