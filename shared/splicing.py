@@ -66,6 +66,17 @@ class PreprocessedLAS:
     stop_depth: float  # in meters
     step: float  # in meters
     curves: List[str] = field(default_factory=list)
+    well_name: str = ''  # Well name from header (sanitized)
+    location: str = ''  # Location from LOC header
+
+
+@dataclass
+class WellGroupResult:
+    """Container for well grouping operation results."""
+    well_groups: Dict[str, List['PreprocessedLAS']]  # {well_name: [files]}
+    duplicate_warnings: List[str]  # List of duplicate file warnings
+    num_wells: int
+    num_files_total: int
 
 
 @dataclass
@@ -1058,6 +1069,204 @@ def preprocess_las_files(
            f"Range: {preprocessed[0].start_depth:.1f}m to {preprocessed[-1].stop_depth:.1f}m")
     
     return preprocessed
+
+
+def group_files_by_well(
+    las_file_objects: List,
+    progress_callback: Optional[Callable[[str, str], None]] = None
+) -> WellGroupResult:
+    """
+    Group uploaded LAS files by their well name.
+    
+    This function:
+    1. Loads each LAS file
+    2. Extracts and sanitizes well name from header
+    3. Detects duplicate files using fingerprint (filename + size + STRT + STOP)
+    4. Groups files by well name
+    5. Sorts each group by start depth (shallowest first)
+    
+    Args:
+        las_file_objects: List of file-like objects or file paths
+        progress_callback: Optional callback(step, message) for progress updates
+        
+    Returns:
+        WellGroupResult with grouped files and duplicate warnings
+    """
+    import lasio
+    import io
+    import hashlib
+    
+    def report(step, msg):
+        if progress_callback:
+            progress_callback(step, msg)
+    
+    well_groups: Dict[str, List[PreprocessedLAS]] = {}
+    duplicate_warnings: List[str] = []
+    seen_fingerprints: Dict[str, set] = {}  # {well_name: {fingerprints}}
+    
+    report("grouping", f"Scanning {len(las_file_objects)} files for well identification...")
+    
+    for i, file_obj in enumerate(las_file_objects):
+        # Get filename and file size
+        if hasattr(file_obj, 'name'):
+            filename = file_obj.name
+        elif isinstance(file_obj, str):
+            filename = file_obj.split('/')[-1]
+        else:
+            filename = f"File_{i+1}"
+        
+        # Get file size for fingerprint
+        if hasattr(file_obj, 'size'):
+            file_size = file_obj.size
+        elif hasattr(file_obj, 'seek') and hasattr(file_obj, 'tell'):
+            file_obj.seek(0, 2)  # Seek to end
+            file_size = file_obj.tell()
+            file_obj.seek(0)  # Reset to beginning
+        else:
+            file_size = 0
+        
+        report("grouping", f"Processing {filename}...")
+        
+        # Load LAS file
+        try:
+            if isinstance(file_obj, str):
+                las = lasio.read(file_obj)
+            elif isinstance(file_obj, bytes):
+                str_data = file_obj.decode("utf-8", errors="ignore")
+                las = lasio.read(io.StringIO(str_data))
+            else:
+                # File-like object (e.g., Streamlit UploadedFile)
+                file_obj.seek(0)
+                bytes_data = file_obj.read()
+                str_data = bytes_data.decode("utf-8", errors="ignore")
+                las = lasio.read(io.StringIO(str_data))
+                # Reset for potential reprocessing
+                file_obj.seek(0)
+        except Exception as e:
+            report("error", f"Failed to load {filename}: {str(e)}")
+            continue
+        
+        # Extract well name (sanitized)
+        try:
+            if 'WELL' in las.well:
+                well_name = str(las.well.WELL.value).strip().upper()
+            else:
+                well_name = 'UNKNOWN'
+        except (AttributeError, KeyError):
+            well_name = 'UNKNOWN'
+        
+        # Handle empty well names
+        if not well_name or well_name.isspace():
+            well_name = 'UNKNOWN'
+        
+        # Extract location
+        try:
+            if 'LOC' in las.well:
+                location = str(las.well.LOC.value).strip()
+            elif 'LOCATION' in las.well:
+                location = str(las.well.LOCATION.value).strip()
+            else:
+                location = ''
+        except (AttributeError, KeyError):
+            location = ''
+        
+        # Get depth values for fingerprint
+        try:
+            strt = float(las.well.STRT.value) if 'STRT' in las.well else 0
+            stop = float(las.well.STOP.value) if 'STOP' in las.well else 0
+        except (AttributeError, ValueError, TypeError):
+            strt = 0
+            stop = 0
+        
+        # Create fingerprint for duplicate detection
+        fingerprint_str = f"{filename}:{file_size}:{strt:.2f}:{stop:.2f}"
+        fingerprint = hashlib.md5(fingerprint_str.encode()).hexdigest()
+        
+        # Check for duplicates within this well
+        if well_name not in seen_fingerprints:
+            seen_fingerprints[well_name] = set()
+        
+        if fingerprint in seen_fingerprints[well_name]:
+            warning = f"Duplicate detected: {filename} (Well: {well_name}) - skipped"
+            duplicate_warnings.append(warning)
+            report("warning", warning)
+            continue
+        
+        seen_fingerprints[well_name].add(fingerprint)
+        
+        # Detect original units
+        original_unit = detect_las_units(las)
+        
+        # Convert to DataFrame
+        df = las.df().reset_index()
+        
+        # Standardize depth column name
+        depth_col = df.columns[0]
+        if depth_col.upper() in ['DEPT', 'DEPTH', 'MD', 'TVD']:
+            df = df.rename(columns={depth_col: 'DEPTH'})
+        else:
+            df = df.rename(columns={depth_col: 'DEPTH'})
+        
+        # Convert to meters
+        df_meters, start_m, stop_m, step_m = convert_las_to_meters(las, df, 'DEPTH')
+        
+        # Strip null padding
+        df_stripped = strip_null_padding(df_meters, 'DEPTH')
+        
+        # Check if DataFrame is empty after stripping
+        if df_stripped.empty or len(df_stripped) == 0:
+            report("warning", f"{filename}: No valid data rows after stripping null padding. Skipping file.")
+            continue
+        
+        # Recalculate bounds after stripping
+        actual_start = df_stripped['DEPTH'].min()
+        actual_stop = df_stripped['DEPTH'].max()
+        
+        # Handle null values in data columns
+        for col in df_stripped.columns:
+            if col != 'DEPTH':
+                for null_val in NULL_VALUES:
+                    df_stripped[col] = df_stripped[col].replace(null_val, np.nan)
+        
+        # Get available curves
+        curves = [c for c in df_stripped.columns if c.upper() != 'DEPTH']
+        
+        # Create PreprocessedLAS object
+        preprocessed_file = PreprocessedLAS(
+            filename=filename,
+            original_unit=original_unit,
+            df=df_stripped,
+            start_depth=actual_start,
+            stop_depth=actual_stop,
+            step=step_m,
+            curves=curves,
+            well_name=well_name,
+            location=location
+        )
+        
+        # Add to appropriate well group
+        if well_name not in well_groups:
+            well_groups[well_name] = []
+        well_groups[well_name].append(preprocessed_file)
+        
+        report("grouping", f"{filename} → Well: {well_name} ({actual_start:.1f}m - {actual_stop:.1f}m)")
+    
+    # Sort each well's files by start depth
+    for well_name in well_groups:
+        well_groups[well_name].sort(key=lambda x: x.start_depth)
+    
+    num_files_total = sum(len(files) for files in well_groups.values())
+    
+    report("grouping", 
+           f"Grouped {num_files_total} files into {len(well_groups)} well(s). "
+           f"Duplicates skipped: {len(duplicate_warnings)}")
+    
+    return WellGroupResult(
+        well_groups=well_groups,
+        duplicate_warnings=duplicate_warnings,
+        num_wells=len(well_groups),
+        num_files_total=num_files_total
+    )
 
 
 def _merge_dataframes_with_gap(
