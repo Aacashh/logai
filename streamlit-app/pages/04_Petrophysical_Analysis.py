@@ -551,42 +551,76 @@ if upload_mode == "Single LAS File" and primary_file:
                             </div>
                             """, unsafe_allow_html=True)
                         
-                        # Professional Log Display with Outliers Highlighted
+                        # Outlier Visualization
                         if result.num_anomalies > 0:
-                            st.markdown("### 📈 Professional Log Display with Outliers Highlighted")
+                            st.markdown("### 🎯 Detected Outliers - Per Curve Visualization")
                             st.markdown("""
-                            <div style="padding: 0.5rem; background: #fff3cd; border-radius: 4px; margin-bottom: 1rem; border-left: 4px solid #ffc107;">
-                                <small style="color: #856404;">
-                                    ⚠️ <strong>Outlier regions highlighted in red shading</strong> - 
-                                    {0} anomalies detected ({1:.1f}% of data)
+                            <div style="padding: 0.5rem; background: #fef2f2; border-radius: 4px; margin-bottom: 1rem; border-left: 4px solid #ef4444;">
+                                <small style="color: #991b1b;">
+                                    🔴 <strong>Red markers show detected outliers on each analyzed curve</strong> - 
+                                    {0} anomalies detected ({1:.1f}% of data). Histogram shows depth distribution.
                                 </small>
                             </div>
                             """.format(result.num_anomalies, result.contamination_actual*100), unsafe_allow_html=True)
                             
-                            from plotting import create_professional_log_display
+                            from plotting import create_outlier_visualization
                             
-                            # Prepare header info
-                            header_display = {
-                                'WELL': header.get('WELL', 'Unknown'),
-                                'FIELD': header.get('FIELD', header.get('FLD', '')),
-                                'STRT': df['DEPTH'].min(),
-                                'STOP': df['DEPTH'].max(),
-                                'STEP': np.median(np.diff(df['DEPTH'].values)) if len(df) > 1 else 0
-                            }
-                            
-                            # Create professional display with outlier highlighting
-                            fig = create_professional_log_display(
-                                df, mapping,
-                                header_info=header_display,
-                                settings={'scale_ratio': scale_ratio, 'depth_unit': unit},
-                                show_gr_fill=True,
-                                show_dn_crossover=True,
-                                highlight_mask=result.anomaly_mask,
-                                highlight_color='#ef4444',
-                                highlight_alpha=0.3
+                            # Create per-curve outlier visualization
+                            outlier_fig = create_outlier_visualization(
+                                df,
+                                selected_features,
+                                result.anomaly_mask,
+                                depth_col='DEPTH',
+                                settings={'scale_ratio': scale_ratio},
+                                title=f"Outlier Detection Results - {outlier_method}"
                             )
-                            st.pyplot(fig)
-                            plt.close(fig)
+                            st.pyplot(outlier_fig)
+                            plt.close(outlier_fig)
+                            
+                            # Outlier depth summary table
+                            st.markdown("### 📋 Outlier Depth Summary")
+                            outlier_depths = df.loc[result.anomaly_mask, 'DEPTH'].values
+                            if len(outlier_depths) > 0:
+                                depth_ranges = []
+                                start_depth = outlier_depths[0]
+                                prev_depth = outlier_depths[0]
+                                
+                                for d in outlier_depths[1:]:
+                                    if d - prev_depth > np.median(np.diff(df['DEPTH'].values)) * 2:
+                                        depth_ranges.append((start_depth, prev_depth))
+                                        start_depth = d
+                                    prev_depth = d
+                                depth_ranges.append((start_depth, prev_depth))
+                                
+                                range_df = pd.DataFrame(depth_ranges, columns=['Start Depth', 'End Depth'])
+                                range_df['Interval'] = range_df['End Depth'] - range_df['Start Depth']
+                                range_df = range_df.round(2)
+                                st.dataframe(range_df, use_container_width=True, hide_index=True)
+                            
+                            # Expandable: Professional multi-track display
+                            with st.expander("📈 Professional Multi-Track Log Display", expanded=False):
+                                from plotting import create_professional_log_display
+                                
+                                header_display = {
+                                    'WELL': header.get('WELL', 'Unknown'),
+                                    'FIELD': header.get('FIELD', header.get('FLD', '')),
+                                    'STRT': df['DEPTH'].min(),
+                                    'STOP': df['DEPTH'].max(),
+                                    'STEP': np.median(np.diff(df['DEPTH'].values)) if len(df) > 1 else 0
+                                }
+                                
+                                fig = create_professional_log_display(
+                                    df, mapping,
+                                    header_info=header_display,
+                                    settings={'scale_ratio': scale_ratio, 'depth_unit': unit},
+                                    show_gr_fill=True,
+                                    show_dn_crossover=True,
+                                    highlight_mask=result.anomaly_mask,
+                                    highlight_color='#ef4444',
+                                    highlight_alpha=0.3
+                                )
+                                st.pyplot(fig)
+                                plt.close(fig)
                             
                             # Feature importance
                             if result.feature_importance:
@@ -801,10 +835,8 @@ if upload_mode == "Single LAS File" and primary_file:
                             # Store result
                             st.session_state[f'{name.lower()}_noise_result'] = result
                         
-                        # Professional Log Display with Noise Highlighted
+                        # Noise Detection Visualization
                         if results:
-                            st.markdown("### 📈 Professional Log Display with Noise Regions Highlighted")
-                            
                             # Combined mask for visualization
                             combined_mask = np.zeros(len(df), dtype=bool)
                             total_noise_points = 0
@@ -812,66 +844,115 @@ if upload_mode == "Single LAS File" and primary_file:
                                 combined_mask |= result.noise_mask
                                 total_noise_points += np.sum(result.noise_mask)
                             
+                            st.markdown("### 🔧 Detected Noise - Per Curve Visualization")
                             st.markdown("""
-                            <div style="padding: 0.5rem; background: #fff3cd; border-radius: 4px; margin-bottom: 1rem; border-left: 4px solid #ff8c00;">
-                                <small style="color: #856404;">
-                                    ⚠️ <strong>Noise regions highlighted in orange shading</strong> - 
-                                    {0} points flagged ({1:.1f}% of data)
+                            <div style="padding: 0.5rem; background: #fff7ed; border-radius: 4px; margin-bottom: 1rem; border-left: 4px solid #ff8c00;">
+                                <small style="color: #9a3412;">
+                                    🟠 <strong>Orange highlighted regions show detected noise on each analyzed curve</strong> - 
+                                    {0} points flagged ({1:.1f}% of data). Dashed lines mark noise boundaries.
                                 </small>
                             </div>
                             """.format(total_noise_points, total_noise_points/len(df)*100), unsafe_allow_html=True)
                             
-                            from plotting import create_professional_log_display
+                            from plotting import create_noise_visualization
                             
-                            # Prepare header info
-                            header_display = {
-                                'WELL': header.get('WELL', 'Unknown'),
-                                'FIELD': header.get('FIELD', header.get('FLD', '')),
-                                'STRT': df['DEPTH'].min(),
-                                'STOP': df['DEPTH'].max(),
-                                'STEP': np.median(np.diff(df['DEPTH'].values)) if len(df) > 1 else 0
-                            }
+                            # Get variance and slope data from first result
+                            variance_data = results[0][1].rolling_variance if hasattr(results[0][1], 'rolling_variance') else None
+                            slope_data = results[0][1].rolling_slope if hasattr(results[0][1], 'rolling_slope') else None
                             
-                            # Create professional display with noise highlighting
-                            fig = create_professional_log_display(
-                                df, mapping,
-                                header_info=header_display,
-                                settings={'scale_ratio': scale_ratio, 'depth_unit': unit},
-                                show_gr_fill=True,
-                                show_dn_crossover=True,
-                                highlight_mask=combined_mask,
-                                highlight_color='#ff8c00',
-                                highlight_alpha=0.4
+                            # Create per-curve noise visualization
+                            noise_fig = create_noise_visualization(
+                                df,
+                                noise_curves,
+                                combined_mask,
+                                variance_data=variance_data,
+                                slope_data=slope_data,
+                                depth_col='DEPTH',
+                                settings={'scale_ratio': scale_ratio},
+                                title=f"Noise Detection Results - {detection_mode}",
+                                noise_type=detection_mode
                             )
-                            st.pyplot(fig)
-                            plt.close(fig)
+                            st.pyplot(noise_fig)
+                            plt.close(noise_fig)
                             
-                            # Variance and slope plots
-                            st.markdown("### 📉 Detection Metrics")
+                            # Noise depth summary
+                            st.markdown("### 📋 Noise Zone Summary")
+                            noise_depths = df.loc[combined_mask, 'DEPTH'].values
+                            if len(noise_depths) > 0:
+                                noise_summary = {
+                                    'Metric': ['Start Depth', 'End Depth', 'Interval', 'Samples Affected', 'Percentage'],
+                                    'Value': [
+                                        f"{np.min(noise_depths):.2f} {unit}",
+                                        f"{np.max(noise_depths):.2f} {unit}",
+                                        f"{np.max(noise_depths) - np.min(noise_depths):.2f} {unit}",
+                                        f"{total_noise_points}",
+                                        f"{total_noise_points/len(df)*100:.2f}%"
+                                    ]
+                                }
+                                st.dataframe(pd.DataFrame(noise_summary), use_container_width=True, hide_index=True)
                             
-                            fig2, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 5))
+                            # Expandable: Detection metrics plots
+                            with st.expander("📉 Detection Metrics (Variance & Slope)", expanded=False):
+                                fig2, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 5))
+                                
+                                depth = df['DEPTH'].values
+                                
+                                # Variance plot with noise region highlighted
+                                if variance_data is not None:
+                                    ax1.plot(variance_data, depth, 'b-', linewidth=0.8, label='Rolling Variance')
+                                    # Highlight noise portion
+                                    noisy_var = np.where(combined_mask, variance_data, np.nan)
+                                    ax1.plot(noisy_var, depth, color='#ff8c00', linewidth=2, label='Noise Region')
+                                ax1.axvline(x=var_threshold, color='r', linestyle='--', linewidth=1.5, label=f'Threshold={var_threshold}')
+                                ax1.set_xlabel('Rolling Variance')
+                                ax1.set_ylabel('Depth (m)')
+                                ax1.set_ylim(depth.max(), depth.min())
+                                ax1.set_title('Rolling Variance Profile')
+                                ax1.legend(fontsize=8)
+                                ax1.grid(True, alpha=0.3)
+                                ax1.set_facecolor('#f8f9fa')
+                                
+                                # Slope plot with noise region highlighted
+                                if slope_data is not None:
+                                    ax2.plot(slope_data, depth, 'g-', linewidth=0.8, label='Rolling Slope')
+                                    noisy_slope = np.where(combined_mask, slope_data, np.nan)
+                                    ax2.plot(noisy_slope, depth, color='#ff8c00', linewidth=2, label='Noise Region')
+                                ax2.axvline(x=slope_threshold, color='r', linestyle='--', linewidth=1.5, label=f'Threshold={slope_threshold}')
+                                ax2.set_xlabel('Rolling Slope')
+                                ax2.set_ylim(depth.max(), depth.min())
+                                ax2.set_title('Rolling Slope Profile')
+                                ax2.legend(fontsize=8)
+                                ax2.grid(True, alpha=0.3)
+                                ax2.set_facecolor('#f8f9fa')
+                                
+                                plt.tight_layout()
+                                st.pyplot(fig2)
+                                plt.close(fig2)
                             
-                            depth = df['DEPTH'].values
-                            ax1.plot(results[0][1].rolling_variance, depth, 'b-', linewidth=0.8)
-                            ax1.axvline(x=var_threshold, color='r', linestyle='--', label=f'Threshold={var_threshold}')
-                            ax1.set_xlabel('Rolling Variance')
-                            ax1.set_ylabel('Depth (m)')
-                            ax1.set_ylim(depth.max(), depth.min())
-                            ax1.set_title('Rolling Variance Profile')
-                            ax1.legend()
-                            ax1.grid(True, alpha=0.3)
-                            
-                            ax2.plot(results[0][1].rolling_slope, depth, 'g-', linewidth=0.8)
-                            ax2.axvline(x=slope_threshold, color='r', linestyle='--', label=f'Threshold={slope_threshold}')
-                            ax2.set_xlabel('Rolling Slope')
-                            ax2.set_ylim(depth.max(), depth.min())
-                            ax2.set_title('Rolling Slope Profile')
-                            ax2.legend()
-                            ax2.grid(True, alpha=0.3)
-                            
-                            plt.tight_layout()
-                            st.pyplot(fig2)
-                            plt.close(fig2)
+                            # Expandable: Professional multi-track display
+                            with st.expander("📈 Professional Multi-Track Log Display", expanded=False):
+                                from plotting import create_professional_log_display
+                                
+                                header_display = {
+                                    'WELL': header.get('WELL', 'Unknown'),
+                                    'FIELD': header.get('FIELD', header.get('FLD', '')),
+                                    'STRT': df['DEPTH'].min(),
+                                    'STOP': df['DEPTH'].max(),
+                                    'STEP': np.median(np.diff(df['DEPTH'].values)) if len(df) > 1 else 0
+                                }
+                                
+                                fig = create_professional_log_display(
+                                    df, mapping,
+                                    header_info=header_display,
+                                    settings={'scale_ratio': scale_ratio, 'depth_unit': unit},
+                                    show_gr_fill=True,
+                                    show_dn_crossover=True,
+                                    highlight_mask=combined_mask,
+                                    highlight_color='#ff8c00',
+                                    highlight_alpha=0.4
+                                )
+                                st.pyplot(fig)
+                                plt.close(fig)
                             
                             # Removal options
                             st.markdown("### 🧹 Remove Detected Noise")
@@ -959,41 +1040,66 @@ if upload_mode == "Single LAS File" and primary_file:
                     n_spikes = np.sum(spike_mask)
                     
                     if n_spikes > 0:
+                        st.markdown("### ⚡ Detected Spikes - Per Curve Visualization")
                         st.markdown("""
-                        <div style="padding: 0.5rem; background: #f8d7da; border-radius: 4px; margin-bottom: 1rem; border-left: 4px solid #dc3545;">
-                            <small style="color: #721c24;">
-                                ⚡ <strong>Spike noise detected</strong> - 
-                                {0} points flagged ({1:.2f}% of data)
+                        <div style="padding: 0.5rem; background: #fef2f2; border-radius: 4px; margin-bottom: 1rem; border-left: 4px solid #dc3545;">
+                            <small style="color: #991b1b;">
+                                ❌ <strong>Red X markers show detected spike anomalies on each curve</strong> - 
+                                {0} spikes detected ({1:.2f}% of data)
                             </small>
                         </div>
                         """.format(n_spikes, n_spikes/len(df)*100), unsafe_allow_html=True)
                         
-                        st.markdown("### 📈 Professional Log Display with Spikes Highlighted")
+                        from plotting import create_spike_visualization
                         
-                        from plotting import create_professional_log_display
-                        
-                        # Prepare header info
-                        header_display = {
-                            'WELL': header.get('WELL', 'Unknown'),
-                            'FIELD': header.get('FIELD', header.get('FLD', '')),
-                            'STRT': df['DEPTH'].min(),
-                            'STOP': df['DEPTH'].max(),
-                            'STEP': np.median(np.diff(df['DEPTH'].values)) if len(df) > 1 else 0
-                        }
-                        
-                        # Create professional display with spike highlighting
-                        fig = create_professional_log_display(
-                            df, mapping,
-                            header_info=header_display,
-                            settings={'scale_ratio': scale_ratio, 'depth_unit': unit},
-                            show_gr_fill=True,
-                            show_dn_crossover=True,
-                            highlight_mask=spike_mask,
-                            highlight_color='#dc3545',
-                            highlight_alpha=0.5
+                        # Create per-curve spike visualization
+                        spike_fig = create_spike_visualization(
+                            df,
+                            noise_curves,
+                            spike_mask,
+                            depth_col='DEPTH',
+                            settings={'scale_ratio': scale_ratio},
+                            title="Spike Noise Detection Results"
                         )
-                        st.pyplot(fig)
-                        plt.close(fig)
+                        st.pyplot(spike_fig)
+                        plt.close(spike_fig)
+                        
+                        # Spike depth summary
+                        st.markdown("### 📋 Spike Locations")
+                        spike_depths = df.loc[spike_mask, 'DEPTH'].values
+                        if len(spike_depths) > 0:
+                            spike_df = pd.DataFrame({
+                                'Depth': spike_depths[:min(20, len(spike_depths))],
+                                **{col: df.loc[spike_mask, col].values[:min(20, len(spike_depths))] for col in noise_curves if col in df.columns}
+                            }).round(3)
+                            if len(spike_depths) > 20:
+                                st.info(f"Showing first 20 of {len(spike_depths)} spikes")
+                            st.dataframe(spike_df, use_container_width=True, hide_index=True)
+                        
+                        # Expandable: Professional display
+                        with st.expander("📈 Professional Multi-Track Log Display", expanded=False):
+                            from plotting import create_professional_log_display
+                            
+                            header_display = {
+                                'WELL': header.get('WELL', 'Unknown'),
+                                'FIELD': header.get('FIELD', header.get('FLD', '')),
+                                'STRT': df['DEPTH'].min(),
+                                'STOP': df['DEPTH'].max(),
+                                'STEP': np.median(np.diff(df['DEPTH'].values)) if len(df) > 1 else 0
+                            }
+                            
+                            fig = create_professional_log_display(
+                                df, mapping,
+                                header_info=header_display,
+                                settings={'scale_ratio': scale_ratio, 'depth_unit': unit},
+                                show_gr_fill=True,
+                                show_dn_crossover=True,
+                                highlight_mask=spike_mask,
+                                highlight_color='#dc3545',
+                                highlight_alpha=0.5
+                            )
+                            st.pyplot(fig)
+                            plt.close(fig)
                     else:
                         st.success("✅ No spikes detected with current threshold settings.")
         

@@ -1537,6 +1537,515 @@ def create_single_curve_plot(
     return fig
 
 
+def create_outlier_visualization(
+    df,
+    curves,
+    outlier_mask,
+    depth_col='DEPTH',
+    settings=None,
+    title="Outlier Detection Results"
+):
+    """
+    Create a comprehensive outlier visualization showing detected outliers on each curve.
+    
+    Args:
+        df: DataFrame with log data
+        curves: List of curve names analyzed
+        outlier_mask: Boolean mask indicating outlier positions
+        depth_col: Name of depth column
+        settings: Optional plot settings
+        title: Main title for the plot
+        
+    Returns:
+        Matplotlib figure
+    """
+    if settings is None:
+        settings = {}
+    
+    depth = df[depth_col].values
+    depth_min = np.nanmin(depth)
+    depth_max = np.nanmax(depth)
+    depth_range = depth_max - depth_min
+    
+    n_curves = len(curves)
+    if n_curves == 0:
+        fig, ax = plt.subplots(figsize=(6, 4))
+        ax.text(0.5, 0.5, "No curves to display", ha='center', va='center')
+        return fig
+    
+    # Calculate figure size
+    scale_ratio = settings.get('scale_ratio', 500)
+    height_in = max(6, min(20, (depth_range * 100) / scale_ratio / 2.54))
+    
+    # Add extra width for histogram column
+    fig_width = 3.5 * n_curves + 3
+    
+    # Create figure with curves + histogram
+    fig = plt.figure(figsize=(fig_width, height_in), facecolor='white')
+    
+    # GridSpec: curves tracks + depth distribution histogram
+    gs = gridspec.GridSpec(1, n_curves + 1, figure=fig,
+                           width_ratios=[3.5] * n_curves + [2],
+                           wspace=0.1)
+    
+    axes = [fig.add_subplot(gs[0, i]) for i in range(n_curves)]
+    ax_hist = fig.add_subplot(gs[0, n_curves])
+    
+    # Share y-axis across all curve tracks
+    for ax in axes[1:]:
+        ax.sharey(axes[0])
+    
+    fig.suptitle(title, fontsize=14, fontweight='bold', y=0.98)
+    
+    # Colors for different curves
+    curve_colors = ['#0066CC', '#CC0000', '#00AA00', '#FF8C00', '#9900CC', '#00CCCC']
+    
+    # Plot each curve with outliers highlighted
+    for i, curve_name in enumerate(curves):
+        ax = axes[i]
+        color = curve_colors[i % len(curve_colors)]
+        
+        ax.set_facecolor(COLORS['TRACK_BG'])
+        ax.grid(True, linestyle='-', linewidth=0.5, color=COLORS['GRID'], alpha=0.7)
+        
+        for spine in ax.spines.values():
+            spine.set_color(COLORS['BORDER'])
+            spine.set_linewidth(1)
+        
+        if curve_name in df.columns:
+            data = df[curve_name].values
+            
+            # Plot the curve
+            ax.plot(data, depth, color=color, linewidth=1.2, alpha=0.7, label='Data')
+            
+            # Plot outliers as red markers
+            outlier_depths = depth[outlier_mask]
+            outlier_values = data[outlier_mask]
+            
+            ax.scatter(outlier_values, outlier_depths, 
+                      c='#ef4444', s=25, marker='o', zorder=5,
+                      edgecolors='white', linewidths=0.5,
+                      label=f'Outliers ({np.sum(outlier_mask)})')
+            
+            # Add shaded regions for outlier zones
+            _add_highlight_shading(ax, depth, outlier_mask, 
+                                  np.nanmin(data), np.nanmax(data),
+                                  '#ef4444', 0.15)
+            
+            # X limits with padding
+            valid_data = data[~np.isnan(data)]
+            if len(valid_data) > 0:
+                x_min = np.percentile(valid_data, 1) - (np.ptp(valid_data) * 0.1)
+                x_max = np.percentile(valid_data, 99) + (np.ptp(valid_data) * 0.1)
+                ax.set_xlim(x_min, x_max)
+        
+        # Title and styling
+        ax.set_title(curve_name, fontsize=10, fontweight='bold', color=color, pad=8)
+        ax.xaxis.set_label_position('top')
+        ax.xaxis.tick_top()
+        ax.tick_params(axis='x', colors=color, labelsize=7)
+        ax.spines['top'].set_color(color)
+        ax.spines['top'].set_linewidth(2)
+        
+        if i == 0:
+            ax.set_ylabel("Depth", fontsize=10, fontweight='bold')
+        else:
+            plt.setp(ax.get_yticklabels(), visible=False)
+        
+        ax.legend(loc='lower right', fontsize=7, framealpha=0.9)
+    
+    # Set y-axis limits (inverted for depth)
+    axes[0].set_ylim(depth_max, depth_min)
+    
+    # Depth distribution histogram
+    ax_hist.set_facecolor('#f8f9fa')
+    ax_hist.set_title("Outlier\nDistribution", fontsize=10, fontweight='bold', pad=8)
+    
+    outlier_depths = depth[outlier_mask]
+    if len(outlier_depths) > 0:
+        # Create horizontal histogram (depth bins)
+        n_bins = min(30, len(outlier_depths) // 2 + 5)
+        bins = np.linspace(depth_min, depth_max, n_bins)
+        
+        counts, bin_edges = np.histogram(outlier_depths, bins=bins)
+        bin_centers = (bin_edges[:-1] + bin_edges[1:]) / 2
+        
+        # Horizontal bar chart
+        ax_hist.barh(bin_centers, counts, height=(bins[1] - bins[0]) * 0.9,
+                    color='#ef4444', alpha=0.7, edgecolor='#dc2626')
+        
+        ax_hist.set_xlabel("Count", fontsize=9)
+        ax_hist.set_ylim(depth_max, depth_min)
+        ax_hist.set_xlim(0, max(counts) * 1.2 if max(counts) > 0 else 1)
+        ax_hist.tick_params(axis='y', labelleft=False)
+        
+        # Add total count annotation
+        ax_hist.text(0.5, 0.02, f"Total: {np.sum(outlier_mask)}", 
+                    transform=ax_hist.transAxes, fontsize=9, fontweight='bold',
+                    ha='center', color='#dc2626')
+    else:
+        ax_hist.text(0.5, 0.5, "No\nOutliers", ha='center', va='center',
+                    fontsize=11, color='#22c55e', fontweight='bold',
+                    transform=ax_hist.transAxes)
+    
+    for spine in ax_hist.spines.values():
+        spine.set_color(COLORS['BORDER'])
+        spine.set_linewidth(1)
+    
+    plt.tight_layout()
+    return fig
+
+
+def create_noise_visualization(
+    df,
+    curves,
+    noise_mask,
+    variance_data=None,
+    slope_data=None,
+    depth_col='DEPTH',
+    settings=None,
+    title="Noise Detection Results",
+    noise_type="Tool Startup"
+):
+    """
+    Create a comprehensive noise detection visualization.
+    
+    Shows each curve with noisy regions highlighted and detection metrics.
+    
+    Args:
+        df: DataFrame with log data
+        curves: List of curve names analyzed
+        noise_mask: Boolean mask indicating noisy positions
+        variance_data: Rolling variance array (optional)
+        slope_data: Rolling slope array (optional)
+        depth_col: Name of depth column
+        settings: Optional plot settings
+        title: Main title
+        noise_type: Type of noise being shown
+        
+    Returns:
+        Matplotlib figure
+    """
+    if settings is None:
+        settings = {}
+    
+    depth = df[depth_col].values
+    depth_min = np.nanmin(depth)
+    depth_max = np.nanmax(depth)
+    depth_range = depth_max - depth_min
+    
+    n_curves = len(curves)
+    if n_curves == 0:
+        fig, ax = plt.subplots(figsize=(6, 4))
+        ax.text(0.5, 0.5, "No curves to display", ha='center', va='center')
+        return fig
+    
+    # Calculate figure size
+    scale_ratio = settings.get('scale_ratio', 500)
+    height_in = max(6, min(20, (depth_range * 100) / scale_ratio / 2.54))
+    
+    # Add columns for metrics if available
+    has_metrics = variance_data is not None or slope_data is not None
+    n_cols = n_curves + (2 if has_metrics else 1)
+    
+    fig_width = 3 * n_cols + 1
+    
+    fig = plt.figure(figsize=(fig_width, height_in), facecolor='white')
+    
+    # Create GridSpec
+    if has_metrics:
+        width_ratios = [3] * n_curves + [2, 2]
+    else:
+        width_ratios = [3] * n_curves + [2]
+    
+    gs = gridspec.GridSpec(1, n_cols, figure=fig, width_ratios=width_ratios, wspace=0.12)
+    
+    # Create axes
+    axes = [fig.add_subplot(gs[0, i]) for i in range(n_curves)]
+    
+    if has_metrics:
+        ax_var = fig.add_subplot(gs[0, n_curves])
+        ax_slope = fig.add_subplot(gs[0, n_curves + 1])
+    else:
+        ax_summary = fig.add_subplot(gs[0, n_curves])
+    
+    # Share y-axis
+    for ax in axes[1:]:
+        ax.sharey(axes[0])
+    
+    fig.suptitle(title, fontsize=14, fontweight='bold', y=0.98)
+    
+    curve_colors = ['#0066CC', '#CC0000', '#00AA00', '#FF8C00', '#9900CC']
+    
+    # Find noise depth range
+    noise_depths = depth[noise_mask]
+    if len(noise_depths) > 0:
+        noise_start = np.min(noise_depths)
+        noise_end = np.max(noise_depths)
+    else:
+        noise_start = noise_end = None
+    
+    # Plot each curve
+    for i, curve_name in enumerate(curves):
+        ax = axes[i]
+        color = curve_colors[i % len(curve_colors)]
+        
+        ax.set_facecolor(COLORS['TRACK_BG'])
+        ax.grid(True, linestyle='-', linewidth=0.5, color=COLORS['GRID'], alpha=0.7)
+        
+        for spine in ax.spines.values():
+            spine.set_color(COLORS['BORDER'])
+            spine.set_linewidth(1)
+        
+        if curve_name in df.columns:
+            data = df[curve_name].values
+            
+            # Plot the full curve
+            ax.plot(data, depth, color=color, linewidth=1.2, alpha=0.7)
+            
+            # Highlight noisy portion with thicker orange line
+            if np.any(noise_mask):
+                noisy_data = data.copy()
+                noisy_data[~noise_mask] = np.nan
+                ax.plot(noisy_data, depth, color='#ff8c00', linewidth=3, alpha=0.9,
+                       label=f'Noise ({np.sum(noise_mask)} pts)')
+                
+                # Add shaded region
+                _add_highlight_shading(ax, depth, noise_mask,
+                                      np.nanmin(data), np.nanmax(data),
+                                      '#ff8c00', 0.25)
+            
+            # Mark noise boundaries with horizontal lines
+            if noise_start is not None:
+                ax.axhline(y=noise_start, color='#ff8c00', linestyle='--', 
+                          linewidth=1.5, alpha=0.8)
+                ax.axhline(y=noise_end, color='#ff8c00', linestyle='--',
+                          linewidth=1.5, alpha=0.8)
+            
+            # X limits
+            valid_data = data[~np.isnan(data)]
+            if len(valid_data) > 0:
+                x_min = np.percentile(valid_data, 1) - (np.ptp(valid_data) * 0.1)
+                x_max = np.percentile(valid_data, 99) + (np.ptp(valid_data) * 0.1)
+                ax.set_xlim(x_min, x_max)
+        
+        ax.set_title(curve_name, fontsize=10, fontweight='bold', color=color, pad=8)
+        ax.xaxis.set_label_position('top')
+        ax.xaxis.tick_top()
+        ax.tick_params(axis='x', colors=color, labelsize=7)
+        ax.spines['top'].set_color(color)
+        ax.spines['top'].set_linewidth(2)
+        
+        if i == 0:
+            ax.set_ylabel("Depth", fontsize=10, fontweight='bold')
+        else:
+            plt.setp(ax.get_yticklabels(), visible=False)
+        
+        if np.any(noise_mask):
+            ax.legend(loc='lower right', fontsize=7, framealpha=0.9)
+    
+    axes[0].set_ylim(depth_max, depth_min)
+    
+    # Plot metrics if available
+    if has_metrics:
+        # Variance plot
+        ax_var.set_facecolor('#f8f9fa')
+        ax_var.set_title("Rolling\nVariance", fontsize=9, fontweight='bold', pad=8)
+        
+        if variance_data is not None:
+            ax_var.plot(variance_data, depth, color='#6366f1', linewidth=1)
+            # Highlight noisy region
+            noisy_var = variance_data.copy() if isinstance(variance_data, np.ndarray) else np.array(variance_data)
+            if len(noisy_var) == len(noise_mask):
+                noisy_var_plot = noisy_var.copy()
+                noisy_var_plot[~noise_mask] = np.nan
+                ax_var.plot(noisy_var_plot, depth, color='#ff8c00', linewidth=2)
+            
+            ax_var.set_xlabel("Variance", fontsize=8)
+        
+        ax_var.set_ylim(depth_max, depth_min)
+        ax_var.tick_params(axis='y', labelleft=False)
+        ax_var.xaxis.set_label_position('top')
+        ax_var.xaxis.tick_top()
+        
+        for spine in ax_var.spines.values():
+            spine.set_color(COLORS['BORDER'])
+            spine.set_linewidth(1)
+        
+        # Slope plot
+        ax_slope.set_facecolor('#f8f9fa')
+        ax_slope.set_title("Rolling\nSlope", fontsize=9, fontweight='bold', pad=8)
+        
+        if slope_data is not None:
+            ax_slope.plot(slope_data, depth, color='#10b981', linewidth=1)
+            noisy_slope = slope_data.copy() if isinstance(slope_data, np.ndarray) else np.array(slope_data)
+            if len(noisy_slope) == len(noise_mask):
+                noisy_slope_plot = noisy_slope.copy()
+                noisy_slope_plot[~noise_mask] = np.nan
+                ax_slope.plot(noisy_slope_plot, depth, color='#ff8c00', linewidth=2)
+            
+            ax_slope.set_xlabel("Slope", fontsize=8)
+        
+        ax_slope.set_ylim(depth_max, depth_min)
+        ax_slope.tick_params(axis='y', labelleft=False)
+        ax_slope.xaxis.set_label_position('top')
+        ax_slope.xaxis.tick_top()
+        
+        for spine in ax_slope.spines.values():
+            spine.set_color(COLORS['BORDER'])
+            spine.set_linewidth(1)
+    else:
+        # Summary panel
+        ax_summary.set_facecolor('#fff7ed')
+        ax_summary.set_title("Noise\nSummary", fontsize=10, fontweight='bold', pad=8)
+        ax_summary.axis('off')
+        
+        n_noise = np.sum(noise_mask)
+        pct = (n_noise / len(noise_mask)) * 100 if len(noise_mask) > 0 else 0
+        
+        summary_text = f"Type: {noise_type}\n\n"
+        summary_text += f"Samples: {n_noise}\n"
+        summary_text += f"Affected: {pct:.1f}%\n\n"
+        if noise_start is not None:
+            summary_text += f"Start: {noise_start:.1f}\n"
+            summary_text += f"End: {noise_end:.1f}"
+        
+        ax_summary.text(0.5, 0.5, summary_text, transform=ax_summary.transAxes,
+                       fontsize=10, ha='center', va='center',
+                       fontweight='bold', color='#c2410c')
+    
+    plt.tight_layout()
+    return fig
+
+
+def create_spike_visualization(
+    df,
+    curves,
+    spike_mask,
+    depth_col='DEPTH',
+    settings=None,
+    title="Spike Noise Detection"
+):
+    """
+    Create visualization for spike noise detection.
+    
+    Args:
+        df: DataFrame with log data
+        curves: List of curve names analyzed
+        spike_mask: Boolean mask indicating spike positions
+        depth_col: Name of depth column
+        settings: Optional plot settings
+        title: Main title
+        
+    Returns:
+        Matplotlib figure
+    """
+    if settings is None:
+        settings = {}
+    
+    depth = df[depth_col].values
+    depth_min = np.nanmin(depth)
+    depth_max = np.nanmax(depth)
+    depth_range = depth_max - depth_min
+    
+    n_curves = len(curves)
+    if n_curves == 0:
+        fig, ax = plt.subplots(figsize=(6, 4))
+        ax.text(0.5, 0.5, "No curves to display", ha='center', va='center')
+        return fig
+    
+    scale_ratio = settings.get('scale_ratio', 500)
+    height_in = max(6, min(20, (depth_range * 100) / scale_ratio / 2.54))
+    
+    fig_width = 3.5 * n_curves + 2
+    
+    fig = plt.figure(figsize=(fig_width, height_in), facecolor='white')
+    
+    gs = gridspec.GridSpec(1, n_curves + 1, figure=fig,
+                           width_ratios=[3.5] * n_curves + [1.5],
+                           wspace=0.1)
+    
+    axes = [fig.add_subplot(gs[0, i]) for i in range(n_curves)]
+    ax_count = fig.add_subplot(gs[0, n_curves])
+    
+    for ax in axes[1:]:
+        ax.sharey(axes[0])
+    
+    fig.suptitle(title, fontsize=14, fontweight='bold', y=0.98)
+    
+    curve_colors = ['#0066CC', '#CC0000', '#00AA00', '#FF8C00', '#9900CC']
+    
+    for i, curve_name in enumerate(curves):
+        ax = axes[i]
+        color = curve_colors[i % len(curve_colors)]
+        
+        ax.set_facecolor(COLORS['TRACK_BG'])
+        ax.grid(True, linestyle='-', linewidth=0.5, color=COLORS['GRID'], alpha=0.7)
+        
+        for spine in ax.spines.values():
+            spine.set_color(COLORS['BORDER'])
+            spine.set_linewidth(1)
+        
+        if curve_name in df.columns:
+            data = df[curve_name].values
+            
+            # Plot curve
+            ax.plot(data, depth, color=color, linewidth=1.2, alpha=0.7)
+            
+            # Mark spikes with red X markers
+            spike_depths = depth[spike_mask]
+            spike_values = data[spike_mask]
+            
+            ax.scatter(spike_values, spike_depths,
+                      c='#dc3545', s=40, marker='x', linewidths=2,
+                      zorder=5, label=f'Spikes ({np.sum(spike_mask)})')
+            
+            # X limits
+            valid_data = data[~np.isnan(data)]
+            if len(valid_data) > 0:
+                x_min = np.percentile(valid_data, 1) - (np.ptp(valid_data) * 0.15)
+                x_max = np.percentile(valid_data, 99) + (np.ptp(valid_data) * 0.15)
+                ax.set_xlim(x_min, x_max)
+        
+        ax.set_title(curve_name, fontsize=10, fontweight='bold', color=color, pad=8)
+        ax.xaxis.set_label_position('top')
+        ax.xaxis.tick_top()
+        ax.tick_params(axis='x', colors=color, labelsize=7)
+        ax.spines['top'].set_color(color)
+        ax.spines['top'].set_linewidth(2)
+        
+        if i == 0:
+            ax.set_ylabel("Depth", fontsize=10, fontweight='bold')
+        else:
+            plt.setp(ax.get_yticklabels(), visible=False)
+        
+        ax.legend(loc='lower right', fontsize=7, framealpha=0.9)
+    
+    axes[0].set_ylim(depth_max, depth_min)
+    
+    # Summary panel
+    ax_count.set_facecolor('#fef2f2')
+    ax_count.axis('off')
+    ax_count.set_title("Summary", fontsize=10, fontweight='bold', pad=8)
+    
+    n_spikes = np.sum(spike_mask)
+    pct = (n_spikes / len(spike_mask)) * 100 if len(spike_mask) > 0 else 0
+    
+    ax_count.text(0.5, 0.6, f"⚡ {n_spikes}", fontsize=24, fontweight='bold',
+                 ha='center', va='center', transform=ax_count.transAxes,
+                 color='#dc3545')
+    ax_count.text(0.5, 0.4, f"spikes\n({pct:.2f}%)", fontsize=10,
+                 ha='center', va='center', transform=ax_count.transAxes,
+                 color='#7f1d1d')
+    
+    for spine in ax_count.spines.values():
+        spine.set_color(COLORS['BORDER'])
+        spine.set_linewidth(1)
+    
+    plt.tight_layout()
+    return fig
+
+
 def create_overlay_plot(
     df,
     curve_names,
