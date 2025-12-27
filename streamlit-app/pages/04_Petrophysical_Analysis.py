@@ -242,38 +242,154 @@ st.markdown("""
 
 
 # =============================================================================
+# HELPER FUNCTION - SCAN FOLDER FOR LAS FILES AND EXTRACT FIELD/WELL INFO
+# =============================================================================
+
+@st.cache_data(show_spinner="Scanning folder for LAS files...")
+def scan_folder_for_las_files(folder_path, max_files=100):
+    """
+    Scan folder for LAS files and extract Field and Well information.
+    Returns dict with {filepath: {'FIELD': ..., 'WELL': ...}}
+    
+    Args:
+        folder_path: Path to folder containing LAS files
+        max_files: Maximum number of files to scan (to prevent long waits)
+    """
+    import glob
+    las_files_info = {}
+    fields = set()
+    wells_by_field = {}
+    
+    # Find all LAS files in folder
+    las_pattern = os.path.join(folder_path, "*.las")
+    las_files = glob.glob(las_pattern, recursive=False)
+    # Also check for .LAS extension
+    las_pattern_upper = os.path.join(folder_path, "*.LAS")
+    las_files.extend(glob.glob(las_pattern_upper, recursive=False))
+    
+    # Limit number of files to scan
+    if len(las_files) > max_files:
+        las_files = las_files[:max_files]
+    
+    for filepath in las_files:
+        try:
+            las = load_las(filepath)
+            header = extract_header_info(las)
+            field = header.get('FIELD', 'Unknown') or 'Unknown'
+            well = header.get('WELL', 'Unknown') or 'Unknown'
+            
+            las_files_info[filepath] = {
+                'FIELD': field,
+                'WELL': well,
+                'FILENAME': os.path.basename(filepath)
+            }
+            
+            fields.add(field)
+            if field not in wells_by_field:
+                wells_by_field[field] = set()
+            wells_by_field[field].add((well, filepath))
+        except Exception as e:
+            continue
+    
+    return {
+        'files': las_files_info,
+        'fields': sorted(list(fields)),
+        'wells_by_field': {k: sorted(list(v)) for k, v in wells_by_field.items()}
+    }
+
+
+# =============================================================================
 # SIDEBAR CONFIGURATION
 # =============================================================================
 
 with st.sidebar:
-    st.markdown("### 📁 Data Upload")
+    st.markdown("### 📁 Data Source")
     
-    # Single file mode or multi-file mode selection
+    # Data source mode selection
     upload_mode = st.radio(
-        "Upload Mode",
-        ["Single LAS File", "Multiple LAS Files"],
-        help="Single file for analysis, multiple for splicing"
+        "Data Source",
+        ["Select Folder", "Upload File(s)"],
+        help="Select folder to browse by Field/Well, or upload files directly"
     )
     
-    if upload_mode == "Single LAS File":
-        primary_file = st.file_uploader(
-            "Upload LAS File",
-            type=['las', 'LAS'],
-            key='petro_primary',
-            help="Upload a well log file for analysis"
+    # Initialize variables
+    primary_file = None
+    secondary_file = None
+    multi_files = None
+    selected_las_path = None
+    folder_scan_result = None
+    
+    if upload_mode == "Select Folder":
+        st.markdown("#### 📂 Folder Selection")
+        
+        # Default folder path
+        default_folder = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), '2025')
+        
+        folder_path = st.text_input(
+            "Folder Path",
+            value=default_folder,
+            help="Enter the path to folder containing LAS files"
         )
-        secondary_file = None
-        multi_files = None
+        
+        if folder_path and os.path.isdir(folder_path):
+            # Scan folder for LAS files
+            folder_scan_result = scan_folder_for_las_files(folder_path)
+            
+            if folder_scan_result['fields']:
+                st.success(f"✅ Found {len(folder_scan_result['files'])} LAS files")
+                
+                # Field dropdown
+                selected_field = st.selectbox(
+                    "🏭 FIELD",
+                    options=folder_scan_result['fields'],
+                    help="Select a field to filter wells"
+                )
+                
+                # Well dropdown (filtered by selected field)
+                if selected_field and selected_field in folder_scan_result['wells_by_field']:
+                    wells_in_field = folder_scan_result['wells_by_field'][selected_field]
+                    well_options = [(w[0], w[1]) for w in wells_in_field]  # (well_name, filepath)
+                    well_names = [w[0] for w in well_options]
+                    
+                    selected_well_idx = st.selectbox(
+                        "🛢️ WELL",
+                        options=range(len(well_names)),
+                        format_func=lambda x: well_names[x],
+                        help="Select a well to view logs"
+                    )
+                    
+                    if selected_well_idx is not None:
+                        selected_las_path = well_options[selected_well_idx][1]
+                        st.info(f"📄 **File:** {os.path.basename(selected_las_path)}")
+            else:
+                st.warning("⚠️ No LAS files found in folder")
+        else:
+            if folder_path:
+                st.error("❌ Invalid folder path")
+    
     else:
-        primary_file = None
-        secondary_file = None
-        multi_files = st.file_uploader(
-            "Upload Multiple LAS Files",
-            type=['las', 'LAS'],
-            key='petro_multi',
-            accept_multiple_files=True,
-            help="Upload multiple files for splicing or alignment"
+        # Original upload mode
+        upload_type = st.radio(
+            "Upload Type",
+            ["Single LAS File", "Multiple LAS Files"],
+            help="Single file for analysis, multiple for splicing"
         )
+        
+        if upload_type == "Single LAS File":
+            primary_file = st.file_uploader(
+                "Upload LAS File",
+                type=['las', 'LAS'],
+                key='petro_primary',
+                help="Upload a well log file for analysis"
+            )
+        else:
+            multi_files = st.file_uploader(
+                "Upload Multiple LAS Files",
+                type=['las', 'LAS'],
+                key='petro_multi',
+                accept_multiple_files=True,
+                help="Upload multiple files for splicing or alignment"
+            )
     
     st.markdown("---")
     
@@ -340,13 +456,21 @@ def display_file_info(header, df, unit, col):
 
 
 # =============================================================================
-# MAIN CONTENT - SINGLE FILE MODE
+# MAIN CONTENT - SINGLE FILE MODE (from folder selection or file upload)
 # =============================================================================
 
-if upload_mode == "Single LAS File" and primary_file:
+# Determine if we have a file to process (either from folder selection or upload)
+has_single_file = (upload_mode == "Select Folder" and selected_las_path) or \
+                  (upload_mode == "Upload File(s)" and primary_file)
+
+if has_single_file:
     try:
-        # Load LAS file
-        las = load_las(primary_file)
+        # Load LAS file from either source
+        if upload_mode == "Select Folder" and selected_las_path:
+            las = load_las(selected_las_path)
+        else:
+            las = load_las(primary_file)
+        
         unit = detect_depth_units(las)
         mapping = get_curve_mapping(las)
         df = process_data(las, mapping)
@@ -1208,7 +1332,7 @@ if upload_mode == "Single LAS File" and primary_file:
 # MAIN CONTENT - MULTI-FILE MODE WITH WELL GROUPING
 # =============================================================================
 
-elif upload_mode == "Multiple LAS Files" and multi_files and len(multi_files) >= 2:
+elif upload_mode == "Upload File(s)" and multi_files and len(multi_files) >= 2:
     try:
         # =================================================================
         # STEP 1: SCAN & GROUP FILES BY WELL
@@ -2319,11 +2443,12 @@ elif upload_mode == "Multiple LAS Files" and multi_files and len(multi_files) >=
 else:
     st.markdown("""
     <div class="info-panel" style="text-align: center; padding: 40px;">
-        <h2 style="color: #38bdf8;">📤 Upload LAS Files to Begin</h2>
+        <h2 style="color: #38bdf8;">📂 Select a Folder or Upload LAS Files to Begin</h2>
         <p style="color: #94a3b8;">
-            Use the sidebar to upload well log files for petrophysical analysis.<br><br>
-            <strong>Single File Mode:</strong> Outlier detection, noise removal, curve analysis<br>
-            <strong>Multi-File Mode:</strong> Log splicing, depth alignment, batch processing
+            Use the sidebar to select a folder or upload well log files for petrophysical analysis.<br><br>
+            <strong>Folder Selection:</strong> Browse by Field and Well from existing LAS files<br>
+            <strong>Single File Upload:</strong> Outlier detection, noise removal, curve analysis<br>
+            <strong>Multi-File Upload:</strong> Log splicing, depth alignment, batch processing
         </p>
     </div>
     """, unsafe_allow_html=True)

@@ -8,6 +8,7 @@ import matplotlib.gridspec as gridspec
 COLORS = {
     'GR': '#00AA00',           # Green for Gamma Ray
     'GR_FILL': '#90EE90',      # Light green for sand shading
+    'CALIPER': '#000000',      # Black for Caliper curve
     'RES_DEEP': '#0066CC',     # Blue for Deep Resistivity
     'RES_MED': '#CC0000',      # Red for Medium Resistivity  
     'RES_SHAL': '#FF8C00',     # Orange for Shallow Resistivity
@@ -24,6 +25,7 @@ COLORS = {
 # Standard curve ranges per industry guidelines
 STANDARD_RANGES = {
     'GR': (0, 150),           # 0-150 API
+    'CALIPER': (6, 16),       # 6-16 inches (DCAL caliper scale)
     'RES': (0.2, 2000),       # 0.2-2000 ohm-m (log scale)
     'RHOB': (1.95, 2.95),     # 1.95-2.95 g/cc
     'NPHI': (-0.15, 0.45),    # -0.15-0.45 v/v (reversed for overlay)
@@ -45,9 +47,11 @@ def create_professional_log_display(
     Creates a professional multi-track well log display following industry standards.
     
     Layout follows Schlumberger Techlog / IP (Interactive Petrophysics) style:
-    - Track 1: Gamma Ray (GR) with sand shading
+    - Track 1: Gamma Ray (GR) with Caliper curve overlay (DCAL, 6-16 inch scale)
     - Track 2: Resistivity curves (Deep, Medium, Shallow) - logarithmic
     - Track 3: Density-Neutron overlay with crossover fill
+    
+    Note: CNPOR (neutron in %) is automatically converted to v/v by dividing by 100.
     
     Args:
         df: DataFrame with log data (must include 'DEPTH' column)
@@ -220,14 +224,14 @@ def _draw_depth_track(ax, depth, depth_min, depth_max, depth_unit='m'):
 
 def _draw_gr_track(ax, df, mapping, depth, settings, show_fill=True, 
                    highlight_mask=None, highlight_color='red', highlight_alpha=0.2):
-    """Draw Gamma Ray track with optional sand shading."""
+    """Draw Gamma Ray track with Caliper curve overlay (no GR shading)."""
     ax.set_facecolor(COLORS['TRACK_BG'])
     
-    # Track header
-    ax.set_title("GAMMA RAY\n(API)", fontsize=9, fontweight='bold', pad=8,
+    # Track header - now includes both GR and Caliper
+    ax.set_title("GAMMA RAY / CALIPER\n(API / inch)", fontsize=9, fontweight='bold', pad=8,
                  color=COLORS['GR'])
     
-    # Get range from settings or use standard
+    # Get range from settings or use standard for GR (primary axis)
     gr_min = settings.get('gr_min', STANDARD_RANGES['GR'][0])
     gr_max = settings.get('gr_max', STANDARD_RANGES['GR'][1])
     ax.set_xlim(gr_min, gr_max)
@@ -238,9 +242,10 @@ def _draw_gr_track(ax, df, mapping, depth, settings, show_fill=True,
     ax.xaxis.set_minor_locator(AutoMinorLocator(5))
     ax.xaxis.grid(True, which='minor', linestyle=':', linewidth=0.3, color=COLORS['GRID'], alpha=0.4)
     
-    # X-axis styling
+    # X-axis styling for GR (top axis - green)
     ax.xaxis.set_label_position('top')
     ax.xaxis.tick_top()
+    ax.set_xlabel("GR (API)", fontsize=8, color=COLORS['GR'], fontweight='bold')
     ax.tick_params(axis='x', colors=COLORS['GR'], labelsize=7)
     ax.spines['top'].set_color(COLORS['GR'])
     ax.spines['top'].set_linewidth(2)
@@ -250,25 +255,53 @@ def _draw_gr_track(ax, df, mapping, depth, settings, show_fill=True,
         ax.spines[spine].set_color(COLORS['BORDER'])
         ax.spines[spine].set_linewidth(1)
     
+    # Legend items
+    legend_handles = []
+    
     # Plot GR curve
     gr_col = mapping.get('GR')
     if gr_col and gr_col in df.columns:
         gr_data = df[gr_col].values.copy()
         
-        # Handle missing data - create masked array
-        valid_mask = ~np.isnan(gr_data)
-        
         # Plot curve (line thickness 1.5px as per guidelines)
         ax.plot(gr_data, depth, color=COLORS['GR'], linewidth=1.5, label='GR')
+        legend_handles.append(mpatches.Patch(color=COLORS['GR'], label='GR'))
         
-        # Sand shading (fill from curve to left edge = low GR = sand)
-        if show_fill:
-            ax.fill_betweenx(depth, gr_data, gr_min,
-                            where=valid_mask,
-                            color=COLORS['GR_FILL'], alpha=0.4)
+        # NOTE: GR shading removed per client request - Caliper curve shown instead
     else:
         ax.text(0.5, 0.5, "No GR Data", transform=ax.transAxes,
                 ha='center', va='center', fontsize=10, color='gray')
+    
+    # Add Caliper curve on secondary axis (DCAL with 6-16 inch scale)
+    cal_col = mapping.get('CALIPER')
+    if cal_col and cal_col in df.columns:
+        # Create secondary x-axis for Caliper
+        ax_cal = ax.twiny()
+        
+        # Caliper range: 6-16 inches (DCAL)
+        cal_min = settings.get('cal_min', STANDARD_RANGES['CALIPER'][0])
+        cal_max = settings.get('cal_max', STANDARD_RANGES['CALIPER'][1])
+        ax_cal.set_xlim(cal_min, cal_max)
+        
+        # Caliper axis styling (top, offset - black)
+        ax_cal.set_xlabel("CALI (inch)", fontsize=8, color=COLORS['CALIPER'], fontweight='bold')
+        ax_cal.tick_params(axis='x', colors=COLORS['CALIPER'], labelsize=7)
+        ax_cal.spines['top'].set_position(('outward', 30))
+        ax_cal.spines['top'].set_color(COLORS['CALIPER'])
+        ax_cal.spines['top'].set_linewidth(2)
+        
+        # Get caliper data
+        cal_data = df[cal_col].values.copy()
+        
+        # Plot caliper curve (black, dashed for distinction)
+        ax_cal.plot(cal_data, depth, color=COLORS['CALIPER'], linewidth=1.5, 
+                    linestyle='--', label='CALI')
+        legend_handles.append(mpatches.Patch(color=COLORS['CALIPER'], label='CALI'))
+    
+    # Add legend
+    if legend_handles:
+        ax.legend(handles=legend_handles, loc='lower right', fontsize=6,
+                 framealpha=0.9, edgecolor=COLORS['BORDER'])
     
     # Highlight regions if provided
     if highlight_mask is not None:
@@ -410,6 +443,14 @@ def _draw_density_neutron_track(ax, df, mapping, depth, settings, show_crossover
     # Plot Neutron (Blue, dashed for distinction)
     if neut_col and neut_col in df.columns:
         neut_data = df[neut_col].values.copy()
+        
+        # Convert CNPOR from % (porosity units PU) to v/v by dividing by 100
+        # Detect if data is in % format (values typically > 1, often 0-45%)
+        # If max valid value > 1, assume it's in % and convert
+        valid_neut = neut_data[~np.isnan(neut_data)]
+        if len(valid_neut) > 0 and np.nanmax(valid_neut) > 1:
+            neut_data = neut_data / 100.0  # Convert % to v/v
+        
         ax_neut.plot(neut_data, depth, color=COLORS['NEUT'], linewidth=1.5, 
                      linestyle='--', label='NPHI')
         
