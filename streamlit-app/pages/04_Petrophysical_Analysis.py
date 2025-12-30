@@ -22,9 +22,19 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 from shared.las_parser import load_las, extract_header_info, detect_depth_units, get_available_curves
-from shared.curve_mapping import get_curve_mapping
+from shared.curve_mapping import get_curve_mapping, get_curve_mapping_advanced, get_identification_summary
 from shared.data_processing import process_data, export_to_las
 from shared.splicing import group_files_by_well, WellGroupResult
+
+# Import the 12-layer curve identification system
+try:
+    from shared.curve_identifier import (
+        CurveIdentifier, identify_curves_layered, format_identification_report,
+        CurveType, FileType, ToolContext, IdentificationReport
+    )
+    CURVE_IDENTIFIER_AVAILABLE = True
+except ImportError:
+    CURVE_IDENTIFIER_AVAILABLE = False
 
 # Page configuration
 st.set_page_config(
@@ -225,6 +235,115 @@ st.markdown("""
         border-radius: 0 8px 8px 0;
         margin: 0.5rem 0;
         color: #fef3c7;
+    }
+    
+    /* Curve Identification Styles */
+    .curve-id-header {
+        background: linear-gradient(135deg, #1e3a5f 0%, #0f172a 100%);
+        padding: 1rem 1.5rem;
+        border-radius: 10px;
+        margin-bottom: 1rem;
+        border: 1px solid #38bdf8;
+    }
+    
+    .layer-badge {
+        display: inline-block;
+        padding: 0.25rem 0.75rem;
+        border-radius: 15px;
+        font-size: 0.75rem;
+        font-weight: 600;
+        margin: 0.2rem;
+        font-family: 'JetBrains Mono', monospace;
+    }
+    
+    .layer-pass { background: #22c55e; color: #0f172a; }
+    .layer-fail { background: #475569; color: #94a3b8; }
+    .layer-active { background: #38bdf8; color: #0f172a; }
+    
+    .confidence-bar {
+        height: 8px;
+        border-radius: 4px;
+        background: #334155;
+        overflow: hidden;
+    }
+    
+    .confidence-fill {
+        height: 100%;
+        border-radius: 4px;
+        transition: width 0.3s ease;
+    }
+    
+    .conf-high { background: linear-gradient(90deg, #22c55e, #4ade80); }
+    .conf-med { background: linear-gradient(90deg, #f59e0b, #fbbf24); }
+    .conf-low { background: linear-gradient(90deg, #ef4444, #f87171); }
+    
+    .curve-row {
+        background: #1e293b;
+        padding: 0.75rem 1rem;
+        border-radius: 8px;
+        margin: 0.5rem 0;
+        border-left: 4px solid #38bdf8;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+    }
+    
+    .curve-row.duplicate {
+        border-left-color: #f59e0b;
+        opacity: 0.7;
+    }
+    
+    .curve-row.unknown {
+        border-left-color: #ef4444;
+    }
+    
+    .insight-box {
+        background: linear-gradient(135deg, #0f172a 0%, #1e293b 100%);
+        border-left: 4px solid #22c55e;
+        padding: 1rem;
+        border-radius: 0 8px 8px 0;
+        margin: 0.5rem 0;
+        color: #94a3b8;
+    }
+    
+    .layer-methodology {
+        background: linear-gradient(180deg, #1e293b 0%, #0f172a 100%);
+        padding: 1.5rem;
+        border-radius: 12px;
+        border: 1px solid #334155;
+    }
+    
+    .layer-item {
+        display: flex;
+        align-items: center;
+        padding: 0.5rem 0;
+        border-bottom: 1px solid #334155;
+    }
+    
+    .layer-num {
+        background: #38bdf8;
+        color: #0f172a;
+        width: 28px;
+        height: 28px;
+        border-radius: 50%;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-weight: 700;
+        font-size: 0.8rem;
+        margin-right: 1rem;
+        flex-shrink: 0;
+    }
+    
+    .layer-name {
+        font-weight: 600;
+        color: #e2e8f0;
+        min-width: 150px;
+    }
+    
+    .layer-purpose {
+        color: #94a3b8;
+        font-size: 0.9rem;
     }
     
     #MainMenu {visibility: hidden;}
@@ -431,6 +550,121 @@ def get_available_feature_columns(df, mapping):
     return feature_cols
 
 
+def _identify_curves_from_mnemonics(curve_names, df=None):
+    """
+    Identify curve types from mnemonic names using layered methodology patterns.
+    This is a lightweight version of the 12-layer system for use with preprocessed files.
+    
+    Implements Layers 2-5 (Keyword matching, Mnemonic matching, Unit validation, Physical range)
+    
+    Args:
+        curve_names: List of curve mnemonic names
+        df: Optional DataFrame with curve data for range validation (Layer 5)
+        
+    Returns:
+        Dictionary mapping curve types to mnemonics
+    """
+    # Enhanced patterns from the 12-layer methodology
+    PATTERNS = {
+        'GR': {
+            'exact': ['GR', 'GRC', 'GR_EDTC', 'SGR', 'CGR', 'HCGR', 'ECGR', 'GRD', 'GRS', 'GRAM', 'NGR', 'GAPI'],
+            'contains': ['GR', 'GAMMA'],
+            'ranges': (0, 300)  # gAPI
+        },
+        'RES_DEEP': {
+            'exact': ['RT', 'RDEP', 'RLLD', 'RLL3', 'ILD', 'RILD', 'LLD', 'RD', 'RDLA', 'RLA5', 'RLA3',
+                     'AT90', 'AHT90', 'R40', 'R36', 'HDRS', 'ATRT', 'RTRUE', 'RXO8'],
+            'contains': ['DEEP', 'RDEP', '_RT', 'LLD'],
+            'ranges': (0.1, 10000)  # ohm.m
+        },
+        'RES_MED': {
+            'exact': ['RM', 'RMED', 'ILM', 'RILM', 'RLM', 'AT60', 'AHT60', 'R24', 'R20', 'HMRS', 'RLA2'],
+            'contains': ['MED', 'RMED', 'ILM'],
+            'ranges': (0.1, 10000)
+        },
+        'RES_SHAL': {
+            'exact': ['RS', 'RSHAL', 'MSFL', 'RXOZ', 'RXO', 'RLL1', 'SFL', 'LLS', 'RSFL', 'RSHA',
+                     'AT10', 'AHT10', 'R10', 'LLHR', 'MLL'],
+            'contains': ['SHAL', 'RSHAL', 'SFL', 'LLS', 'MSFL'],
+            'ranges': (0.1, 10000)
+        },
+        'DENS': {
+            'exact': ['RHOB', 'RHOZ', 'DEN', 'ZDEN', 'BDEL', 'DENB', 'DENC', 'RHO', 'RHOF', 'DENS', 'HDENS'],
+            'contains': ['RHOB', 'DENS', 'DEN'],
+            'ranges': (1.5, 3.2)  # g/cc
+        },
+        'NEUT': {
+            'exact': ['NPHI', 'TNPH', 'NPHZ', 'CNPOR', 'NPOR', 'TNPHI', 'PHIN', 'NEU', 'NEUT',
+                     'NPSS', 'NPLS', 'HNPO', 'APLC', 'APSC'],
+            'contains': ['NPHI', 'NEUT', 'NEU'],
+            'ranges': (-0.15, 0.60)  # v/v
+        },
+        'SONIC': {
+            'exact': ['DT', 'DTC', 'DTCO', 'AC', 'SONIC', 'DTS', 'DTCS', 'DTSM', 'DT4P', 'DT4S', 'DTLN'],
+            'contains': ['DT', 'SONIC', 'DTCO'],
+            'ranges': (40, 200)  # us/ft
+        },
+        'CALIPER': {
+            'exact': ['CALI', 'CAL', 'HCAL', 'DCAL', 'CALS', 'BS', 'C1', 'C2', 'C13', 'C24', 'LCAL'],
+            'contains': ['CALI', 'CAL'],
+            'ranges': (4, 20)  # inches
+        },
+        'SP': {
+            'exact': ['SP', 'SSP', 'PSP', 'SPR'],
+            'contains': ['SP'],
+            'ranges': (-200, 100)  # mV
+        },
+        'PEF': {
+            'exact': ['PEF', 'PE', 'PEFZ', 'PEZ', 'PEFA'],
+            'contains': ['PEF', 'PE'],
+            'ranges': (1.5, 6.0)  # b/e
+        }
+    }
+    
+    mapping = {}
+    used_curves = set()
+    
+    # First pass: exact matches (Layer 3 - Mnemonic Matching)
+    for curve_type, config in PATTERNS.items():
+        for curve in curve_names:
+            if curve in used_curves:
+                continue
+            curve_upper = curve.upper().strip()
+            if curve_upper in config['exact']:
+                mapping[curve_type] = curve
+                used_curves.add(curve)
+                break
+    
+    # Second pass: contains matches for unmatched curve types
+    for curve_type, config in PATTERNS.items():
+        if curve_type in mapping:
+            continue
+        for curve in curve_names:
+            if curve in used_curves:
+                continue
+            curve_upper = curve.upper().strip()
+            for pattern in config['contains']:
+                if pattern in curve_upper:
+                    # Layer 5: Physical Range validation if df is available
+                    if df is not None and curve in df.columns:
+                        data = df[curve].dropna()
+                        if len(data) > 10:
+                            data_min = np.percentile(data, 5)
+                            data_max = np.percentile(data, 95)
+                            range_min, range_max = config['ranges']
+                            # Check if data is in expected range
+                            if not (data_min >= range_min * 0.5 and data_max <= range_max * 2):
+                                continue  # Skip if range doesn't match
+                    
+                    mapping[curve_type] = curve
+                    used_curves.add(curve)
+                    break
+            if curve_type in mapping:
+                break
+    
+    return mapping
+
+
 def display_file_info(header, df, unit, col):
     """Display file information in a styled panel."""
     col.markdown(f"""
@@ -462,7 +696,14 @@ if has_single_file:
             las = load_las(primary_file)
         
         unit = detect_depth_units(las)
-        mapping = get_curve_mapping(las)
+        
+        # Use advanced curve identification if available
+        identification_report = None
+        if CURVE_IDENTIFIER_AVAILABLE:
+            mapping, identification_report = get_curve_mapping_advanced(las, use_layered=True)
+        else:
+            mapping = get_curve_mapping(las)
+        
         df = process_data(las, mapping)
         header = extract_header_info(las)
         
@@ -490,6 +731,228 @@ if has_single_file:
         
         # Get available features
         feature_columns = get_available_feature_columns(df, mapping)
+        
+        # =================================================================
+        # CURVE IDENTIFICATION RESULTS (12-Layer Methodology)
+        # =================================================================
+        if identification_report and CURVE_IDENTIFIER_AVAILABLE:
+            with st.expander("🎯 Curve Identification (12-Layer Methodology)", expanded=True):
+                # Header with overall stats
+                summary = get_identification_summary(identification_report)
+                
+                st.markdown(f"""
+                <div class="curve-id-header">
+                    <div style="display: flex; justify-content: space-between; align-items: center;">
+                        <div>
+                            <span style="font-size: 1.3rem; font-weight: 700; color: #38bdf8;">
+                                🔬 Intelligent Curve Identification
+                            </span>
+                            <br>
+                            <span style="color: #94a3b8; font-size: 0.9rem;">
+                                Tool Context: <strong>{summary['tool_context']}</strong> | 
+                                {summary['identified_curves']} of {summary['total_curves']} curves identified
+                            </span>
+                        </div>
+                        <div style="text-align: right;">
+                            <span style="font-size: 2rem; font-weight: 700; color: {'#22c55e' if summary['overall_confidence'] > 0.7 else '#f59e0b' if summary['overall_confidence'] > 0.4 else '#ef4444'};">
+                                {summary['overall_confidence']:.0%}
+                            </span>
+                            <br>
+                            <span style="color: #94a3b8; font-size: 0.8rem;">Overall Confidence</span>
+                        </div>
+                    </div>
+                </div>
+                """, unsafe_allow_html=True)
+                
+                # Show the 12-layer methodology
+                with st.expander("📋 12-Layer Methodology Explained", expanded=False):
+                    st.markdown("""
+                    <div class="layer-methodology">
+                        <div class="layer-item">
+                            <div class="layer-num">0</div>
+                            <div class="layer-name">File & Context</div>
+                            <div class="layer-purpose">File type: LAS / DLIS</div>
+                        </div>
+                        <div class="layer-item">
+                            <div class="layer-num">1</div>
+                            <div class="layer-name">Header Reading</div>
+                            <div class="layer-purpose">Capture <em>human intent</em> from logging engineers</div>
+                        </div>
+                        <div class="layer-item">
+                            <div class="layer-num">2</div>
+                            <div class="layer-name">Keyword / NLP</div>
+                            <div class="layer-purpose">Keyword matching (gamma, neutron, density, resistivity)</div>
+                        </div>
+                        <div class="layer-item">
+                            <div class="layer-num">3</div>
+                            <div class="layer-name">Mnemonic Matching</div>
+                            <div class="layer-purpose">Capture industry conventions</div>
+                        </div>
+                        <div class="layer-item">
+                            <div class="layer-num">4</div>
+                            <div class="layer-name">Unit Validation</div>
+                            <div class="layer-purpose">Validate physical meaning</div>
+                        </div>
+                        <div class="layer-item">
+                            <div class="layer-num">5</div>
+                            <div class="layer-name">Physical Range</div>
+                            <div class="layer-purpose">Apply laws of physics (Density: 1.9–3.0 g/cc)</div>
+                        </div>
+                        <div class="layer-item">
+                            <div class="layer-num">6</div>
+                            <div class="layer-name">Statistical Shape</div>
+                            <div class="layer-purpose">Identify curve behavior patterns</div>
+                        </div>
+                        <div class="layer-item">
+                            <div class="layer-num">7</div>
+                            <div class="layer-name">Tool Context</div>
+                            <div class="layer-purpose">Resolve ambiguity using logging context (LWD → R40/R36 more likely than LLD)</div>
+                        </div>
+                        <div class="layer-item">
+                            <div class="layer-num">8</div>
+                            <div class="layer-name">Cross-Curve Checks</div>
+                            <div class="layer-purpose">High GR + low Rt → shale</div>
+                        </div>
+                        <div class="layer-item">
+                            <div class="layer-num">9</div>
+                            <div class="layer-name">Duplicate Resolution</div>
+                            <div class="layer-purpose">Choose the <em>best</em> curve when multiples exist</div>
+                        </div>
+                        <div class="layer-item">
+                            <div class="layer-num">10</div>
+                            <div class="layer-name">Confidence & Explainability</div>
+                            <div class="layer-purpose">Confidence score (0–1)</div>
+                        </div>
+                        <div class="layer-item" style="border-bottom: none;">
+                            <div class="layer-num">11</div>
+                            <div class="layer-name">Learning & Exceptions</div>
+                            <div class="layer-purpose">Active learning</div>
+                        </div>
+                    </div>
+                    """, unsafe_allow_html=True)
+                
+                # Confidence distribution
+                conf_col1, conf_col2, conf_col3 = st.columns(3)
+                with conf_col1:
+                    st.markdown(f"""
+                    <div class="metric-card">
+                        <div class="metric-value" style="color: #22c55e;">{summary['high_confidence']}</div>
+                        <div class="metric-label">High Confidence (≥70%)</div>
+                    </div>
+                    """, unsafe_allow_html=True)
+                with conf_col2:
+                    st.markdown(f"""
+                    <div class="metric-card">
+                        <div class="metric-value" style="color: #f59e0b;">{summary['medium_confidence']}</div>
+                        <div class="metric-label">Medium Confidence (40-70%)</div>
+                    </div>
+                    """, unsafe_allow_html=True)
+                with conf_col3:
+                    st.markdown(f"""
+                    <div class="metric-card">
+                        <div class="metric-value" style="color: #ef4444;">{summary['low_confidence']}</div>
+                        <div class="metric-label">Low Confidence (<40%)</div>
+                    </div>
+                    """, unsafe_allow_html=True)
+                
+                st.markdown("---")
+                
+                # Curve identification results table
+                st.markdown("#### 📊 Identified Curves")
+                
+                # Build results dataframe
+                results_data = []
+                for mnemonic, result in identification_report.curve_results.items():
+                    conf_pct = result.confidence_score * 100
+                    conf_class = 'high' if conf_pct >= 70 else 'med' if conf_pct >= 40 else 'low'
+                    
+                    # Layer badges
+                    passed_layers = [lr.layer_number for lr in result.layer_results if lr.passed]
+                    
+                    results_data.append({
+                        'Mnemonic': mnemonic,
+                        'Identified As': result.identified_type.value,
+                        'Confidence': f"{conf_pct:.0f}%",
+                        'Confidence_Val': conf_pct,
+                        'Layers Passed': ', '.join(map(str, passed_layers)) if passed_layers else 'None',
+                        'Status': '✓ Primary' if result.selected_as_primary else f'○ Duplicate of {result.duplicate_of}' if result.is_duplicate else '?',
+                        'Explanation': result.explanation[:60] + '...' if len(result.explanation) > 60 else result.explanation
+                    })
+                
+                results_df = pd.DataFrame(results_data)
+                results_df = results_df.sort_values('Confidence_Val', ascending=False)
+                
+                # Display with custom styling
+                for _, row in results_df.iterrows():
+                    conf_val = row['Confidence_Val']
+                    conf_color = '#22c55e' if conf_val >= 70 else '#f59e0b' if conf_val >= 40 else '#ef4444'
+                    border_color = conf_color if row['Status'].startswith('✓') else '#f59e0b' if 'Duplicate' in row['Status'] else '#ef4444'
+                    
+                    st.markdown(f"""
+                    <div style="background: #1e293b; padding: 0.75rem 1rem; border-radius: 8px; margin: 0.5rem 0; border-left: 4px solid {border_color};">
+                        <div style="display: flex; justify-content: space-between; align-items: center;">
+                            <div>
+                                <span style="font-weight: 700; color: #e2e8f0; font-family: 'JetBrains Mono', monospace;">{row['Mnemonic']}</span>
+                                <span style="color: #64748b; margin: 0 0.5rem;">→</span>
+                                <span style="font-weight: 600; color: #38bdf8;">{row['Identified As']}</span>
+                                <span style="color: #64748b; font-size: 0.8rem; margin-left: 1rem;">{row['Status']}</span>
+                            </div>
+                            <div style="display: flex; align-items: center; gap: 1rem;">
+                                <div style="text-align: right;">
+                                    <span style="font-weight: 700; color: {conf_color}; font-size: 1.1rem;">{row['Confidence']}</span>
+                                    <div style="width: 100px; height: 6px; background: #334155; border-radius: 3px; overflow: hidden; margin-top: 4px;">
+                                        <div style="width: {conf_val}%; height: 100%; background: {conf_color}; border-radius: 3px;"></div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                        <div style="color: #94a3b8; font-size: 0.8rem; margin-top: 0.5rem;">
+                            {row['Explanation']}
+                        </div>
+                        <div style="margin-top: 0.5rem;">
+                            <span style="color: #64748b; font-size: 0.75rem;">Layers passed: </span>
+                            {' '.join([f'<span class="layer-badge layer-pass">{l}</span>' for l in row['Layers Passed'].split(', ') if l and l != 'None'])}
+                        </div>
+                    </div>
+                    """, unsafe_allow_html=True)
+                
+                # Cross-curve insights
+                if identification_report.cross_curve_insights:
+                    st.markdown("#### 💡 Cross-Curve Insights")
+                    for insight in identification_report.cross_curve_insights:
+                        st.markdown(f"""
+                        <div class="insight-box">
+                            💡 {insight}
+                        </div>
+                        """, unsafe_allow_html=True)
+                
+                # Duplicate warnings
+                if identification_report.duplicate_warnings:
+                    st.markdown("#### ⚠️ Duplicate Curve Warnings")
+                    for warning in identification_report.duplicate_warnings:
+                        st.markdown(f"""
+                        <div class="duplicate-warning">
+                            ⚠️ {warning}
+                        </div>
+                        """, unsafe_allow_html=True)
+                
+                # Final mapping summary
+                st.markdown("#### 🗺️ Final Curve Mapping")
+                mapping_cols = st.columns(4)
+                col_idx = 0
+                for curve_type, mnemonic in identification_report.mapping.items():
+                    with mapping_cols[col_idx % 4]:
+                        result = identification_report.curve_results.get(mnemonic)
+                        conf = result.confidence_score if result else 0
+                        conf_color = '#22c55e' if conf >= 0.7 else '#f59e0b' if conf >= 0.4 else '#ef4444'
+                        st.markdown(f"""
+                        <div style="background: #334155; padding: 0.5rem; border-radius: 6px; margin: 0.25rem 0; text-align: center;">
+                            <span style="color: #94a3b8; font-size: 0.75rem;">{curve_type}</span><br>
+                            <span style="font-weight: 700; color: #e2e8f0; font-family: 'JetBrains Mono', monospace;">{mnemonic}</span>
+                            <span style="color: {conf_color}; font-size: 0.75rem; margin-left: 0.5rem;">({conf:.0%})</span>
+                        </div>
+                        """, unsafe_allow_html=True)
+                    col_idx += 1
         
         # Add professional log preview following industry standards
         with st.expander("📊 Professional Log Display (Industry Standard)", expanded=True):
@@ -1491,26 +1954,8 @@ elif upload_mode == "Upload Multiple (Splicing)" and multi_files and len(multi_f
                         }
                         headers.append(header_info)
                         
-                        # Create mapping from available curves
-                        mapping = {}
-                        for curve in preprocessed_file.curves:
-                            curve_upper = curve.upper()
-                            if 'GR' in curve_upper:
-                                mapping['GR'] = curve
-                            elif 'RT' in curve_upper or 'RDEP' in curve_upper or 'ILD' in curve_upper:
-                                mapping['RES_DEEP'] = curve
-                            elif 'RM' in curve_upper or 'RMED' in curve_upper or 'ILM' in curve_upper:
-                                mapping['RES_MED'] = curve
-                            elif 'RS' in curve_upper or 'RSHAL' in curve_upper or 'LLS' in curve_upper:
-                                mapping['RES_SHAL'] = curve
-                            elif 'RHOB' in curve_upper or 'DEN' in curve_upper:
-                                mapping['DENS'] = curve
-                            elif 'NPHI' in curve_upper or 'NEU' in curve_upper:
-                                mapping['NEUT'] = curve
-                            elif 'DT' in curve_upper or 'SONIC' in curve_upper:
-                                mapping['SONIC'] = curve
-                            elif 'CALI' in curve_upper:
-                                mapping['CALIPER'] = curve
+                        # Create mapping using enhanced pattern matching (12-layer methodology concepts)
+                        mapping = _identify_curves_from_mnemonics(preprocessed_file.curves, df)
                         mappings.append(mapping)
                     
                     st.session_state['petro_selected_well'] = selected_well

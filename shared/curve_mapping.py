@@ -1,21 +1,31 @@
 """
 Curve Mapping Module
 Automatically maps LAS curve mnemonics to standard track types.
+
+Supports two modes:
+1. Simple mode: Fast mnemonic-only matching (original behavior)
+2. Layered mode: Full 12-layer identification methodology
+
+Use get_curve_mapping() for simple mode (default)
+Use get_curve_mapping_advanced() for full layered identification
 """
 
-# Standard curve mnemonics for automatic detection
+# Standard curve mnemonics for automatic detection (simple mode)
 CURVE_MNEMONICS = {
-    'DEPTH': ['DEPT', 'DEPTH', 'DPTH', 'MD', 'TVD'],
-    'GR': ['GR', 'GRC', 'GR_EDTC', 'SGR', 'CGR', 'HCGR'],
-    'RES_DEEP': ['RT', 'RDEP', 'RLLD', 'RLL3', 'ILD', 'RILD', 'LLD', 'RD'],
-    'RES_MED': ['RM', 'ILM', 'RILS', 'RLM', 'RILM'],
-    'RES_SHAL': ['RS', 'MSFL', 'RXOZ', 'RLL1', 'SFL', 'LLS', 'RSFL'],
-    'DENS': ['RHOB', 'RHOZ', 'DEN', 'ZDEN', 'BDEL'],
-    'NEUT': ['NPHI', 'TNPH', 'NPHZ', 'CNPOR', 'NPOR', 'TNPHI'],
-    'SONIC': ['DT', 'DTC', 'DTCO', 'AC', 'SONIC'],
-    'CALIPER': ['CALI', 'CAL', 'HCAL', 'DCAL'],
-    'SP': ['SP', 'SSP'],
-    'PEF': ['PEF', 'PE', 'PEFZ'],
+    'DEPTH': ['DEPT', 'DEPTH', 'DPTH', 'MD', 'TVD', 'TVDSS', 'AHD'],
+    'GR': ['GR', 'GRC', 'GR_EDTC', 'SGR', 'CGR', 'HCGR', 'ECGR', 'GRD', 'GRS', 'GRAM', 'NGR'],
+    'RES_DEEP': ['RT', 'RDEP', 'RLLD', 'RLL3', 'ILD', 'RILD', 'LLD', 'RD', 'RDLA', 'RLA5', 
+                 'AT90', 'AHT90', 'R40', 'R36', 'HDRS', 'ATRT', 'RTRUE'],
+    'RES_MED': ['RM', 'RMED', 'ILM', 'RILM', 'RLM', 'AT60', 'AHT60', 'R24', 'R20', 'HMRS', 'RLA2'],
+    'RES_SHAL': ['RS', 'RSHAL', 'MSFL', 'RXOZ', 'RXO', 'RLL1', 'SFL', 'LLS', 'RSFL', 'AT10', 
+                 'AHT10', 'R10', 'LLHR', 'MLL'],
+    'DENS': ['RHOB', 'RHOZ', 'DEN', 'ZDEN', 'BDEL', 'DENB', 'DENC', 'RHO', 'RHOF', 'DENS', 'HDENS'],
+    'NEUT': ['NPHI', 'TNPH', 'NPHZ', 'CNPOR', 'NPOR', 'TNPHI', 'PHIN', 'NEU', 'NEUT', 
+             'NPSS', 'NPLS', 'HNPO', 'APLC'],
+    'SONIC': ['DT', 'DTC', 'DTCO', 'AC', 'SONIC', 'DTS', 'DTCS', 'DTSM', 'DT4P', 'DTLN'],
+    'CALIPER': ['CALI', 'CAL', 'HCAL', 'DCAL', 'CALS', 'BS', 'C1', 'C2', 'LCAL', 'SCAL'],
+    'SP': ['SP', 'SSP', 'PSP', 'SPR'],
+    'PEF': ['PEF', 'PE', 'PEFZ', 'PEZ', 'PEFA'],
 }
 
 # Track configuration from CSV specification
@@ -141,7 +151,7 @@ def create_track_layout(mapping):
     tracks = []
     
     # Track 0: Depth (always present)
-    if mapping['DEPTH']:
+    if mapping.get('DEPTH'):
         tracks.append({
             'id': 0,
             'type': 'depth',
@@ -149,7 +159,7 @@ def create_track_layout(mapping):
         })
     
     # Track 1: Gamma Ray
-    if mapping['GR']:
+    if mapping.get('GR'):
         tracks.append({
             'id': 1,
             'type': 'gamma_ray',
@@ -159,15 +169,15 @@ def create_track_layout(mapping):
     
     # Track 2: Resistivity
     res_curves = []
-    if mapping['RES_DEEP']:
+    if mapping.get('RES_DEEP'):
         res_curves.append({'name': mapping['RES_DEEP'], 'config': TRACK_CONFIG['RES_DEEP']})
-    if mapping['RES_MED']:
+    if mapping.get('RES_MED'):
         # Medium Resistivity -> Red
         med_config = TRACK_CONFIG['RES_DEEP'].copy()
         med_config['name'] = 'Resistivity Medium'
         med_config['color'] = '#FF0000' # Red
         res_curves.append({'name': mapping['RES_MED'], 'config': med_config})
-    if mapping['RES_SHAL']:
+    if mapping.get('RES_SHAL'):
         # Shallow Resistivity -> Orange
         shal_config = TRACK_CONFIG['RES_DEEP'].copy()
         shal_config['name'] = 'Resistivity Shallow'
@@ -184,9 +194,9 @@ def create_track_layout(mapping):
     
     # Track 3: Density-Neutron
     dn_curves = []
-    if mapping['DENS']:
+    if mapping.get('DENS'):
         dn_curves.append({'name': mapping['DENS'], 'config': TRACK_CONFIG['DENS']})
-    if mapping['NEUT']:
+    if mapping.get('NEUT'):
         dn_curves.append({'name': mapping['NEUT'], 'config': TRACK_CONFIG['NEUT']})
     
     if dn_curves:
@@ -198,3 +208,95 @@ def create_track_layout(mapping):
         })
     
     return tracks
+
+
+# =============================================================================
+# ADVANCED CURVE IDENTIFICATION (12-Layer Methodology)
+# =============================================================================
+
+def get_curve_mapping_advanced(las, use_layered=True):
+    """
+    Get curve mapping using the advanced 12-layer methodology.
+    
+    This provides comprehensive curve identification with:
+    - Multi-layer validation (mnemonic, unit, range, statistics)
+    - Confidence scoring
+    - Duplicate resolution
+    - Cross-curve validation
+    - Explainable results
+    
+    Args:
+        las: lasio.LASFile object
+        use_layered: If True, use full 12-layer method; if False, fall back to simple
+        
+    Returns:
+        tuple: (mapping_dict, identification_report)
+            - mapping_dict: Standard mapping dictionary for compatibility
+            - identification_report: Full IdentificationReport object with details
+    """
+    if not use_layered:
+        return get_curve_mapping(las), None
+    
+    try:
+        from .curve_identifier import identify_curves_layered, IdentificationReport
+        
+        report = identify_curves_layered(las, "LAS")
+        
+        # Convert to standard mapping format for backward compatibility
+        mapping = {
+            'DEPTH': None,
+            'GR': None,
+            'RES_DEEP': None,
+            'RES_MED': None,
+            'RES_SHAL': None,
+            'DENS': None,
+            'NEUT': None,
+            'SONIC': None,
+            'CALIPER': None,
+            'SP': None,
+            'PEF': None,
+        }
+        
+        # Merge the identified mappings
+        for curve_type, mnemonic in report.mapping.items():
+            if curve_type in mapping:
+                mapping[curve_type] = mnemonic
+        
+        return mapping, report
+        
+    except ImportError:
+        # Fall back to simple mapping if curve_identifier not available
+        return get_curve_mapping(las), None
+
+
+def get_identification_summary(report):
+    """
+    Get a concise summary of curve identification results.
+    
+    Args:
+        report: IdentificationReport from get_curve_mapping_advanced
+        
+    Returns:
+        dict with summary statistics
+    """
+    if report is None:
+        return None
+    
+    high_conf = sum(1 for r in report.curve_results.values() 
+                   if r.confidence_score >= 0.7)
+    med_conf = sum(1 for r in report.curve_results.values() 
+                  if 0.4 <= r.confidence_score < 0.7)
+    low_conf = sum(1 for r in report.curve_results.values() 
+                  if r.confidence_score < 0.4)
+    
+    return {
+        'total_curves': len(report.curve_results),
+        'identified_curves': len(report.mapping),
+        'high_confidence': high_conf,
+        'medium_confidence': med_conf,
+        'low_confidence': low_conf,
+        'overall_confidence': report.overall_confidence,
+        'tool_context': report.tool_context.value,
+        'duplicates': len(report.duplicate_warnings),
+        'insights': len(report.cross_curve_insights)
+    }
