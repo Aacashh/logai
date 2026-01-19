@@ -24,6 +24,71 @@ from enum import Enum
 import re
 
 
+# =============================================================================
+# ROBUST SCORING WEIGHTS (from client log_core.py)
+# =============================================================================
+# Explicit point-based scoring for curve identification.
+# Total max score: 100 points
+
+SCORE_WEIGHTS = {
+    "unit": 40,          # Unit validation - strongest signal
+    "range": 25,         # Physical range validation
+    "description": 15,   # Keyword match in description
+    "mnemonic": 10,      # Mnemonic pattern match
+    "coverage": 10,      # Non-null data coverage (scaled 0-10)
+}
+
+# Minimum score threshold to identify a curve (below this = UNKNOWN)
+MIN_CONFIDENCE_THRESHOLD = 15
+
+# Null values commonly used in well logs
+NULL_VALUES = {-999, -999.25, -999.0, -9999, -9999.25}
+
+
+def _clean_unit(unit: str) -> str:
+    """Normalize unit string for robust comparison."""
+    if not unit:
+        return ""
+    return unit.lower().replace(" ", "").replace(".", "").replace("-", "").replace("_", "")
+
+
+def _ensure_array(data) -> np.ndarray:
+    """Ensure data is a numpy array, not a scalar. Fixes scalar-passed-as-array bug."""
+    if data is None:
+        return np.array([])
+    if np.ndim(data) == 0:
+        return np.array([data])
+    return np.asarray(data)
+
+
+def _calculate_coverage(data: np.ndarray) -> float:
+    """Calculate non-null data coverage ratio (0.0 to 1.0)."""
+    data = _ensure_array(data)
+    if len(data) == 0:
+        return 0.0
+    # Replace common null values with NaN
+    data = data.astype(float)
+    for null_val in NULL_VALUES:
+        data = np.where(data == null_val, np.nan, data)
+    valid_count = np.sum(~np.isnan(data))
+    return valid_count / len(data)
+
+
+def _percentile_range(data: np.ndarray) -> Optional[Tuple[float, float]]:
+    """Get 7th and 93rd percentile range for robust outlier handling."""
+    data = _ensure_array(data)
+    if len(data) == 0:
+        return None
+    # Replace null values
+    data = data.astype(float)
+    for null_val in NULL_VALUES:
+        data = np.where(data == null_val, np.nan, data)
+    valid_data = data[~np.isnan(data)]
+    if len(valid_data) < 10:
+        return None
+    return (float(np.percentile(valid_data, 7)), float(np.percentile(valid_data, 93)))
+
+
 class CurveType(Enum):
     """Standard curve types in well logging."""
     DEPTH = "DEPTH"
@@ -74,9 +139,11 @@ class CurveIdentificationResult:
     original_mnemonic: str
     identified_type: CurveType
     confidence_score: float  # 0.0 to 1.0
+    raw_score: float  # Raw point score (0-100)
     layer_results: List[LayerResult]
     explanation: str
     alternative_types: List[Tuple[CurveType, float]]  # (type, confidence)
+    score_breakdown: Dict[str, float] = field(default_factory=dict)  # Points per category
     is_duplicate: bool = False
     duplicate_of: Optional[str] = None
     selected_as_primary: bool = True
@@ -100,8 +167,9 @@ class IdentificationReport:
 
 # Layer 2 & 3: Keyword and Mnemonic patterns
 CURVE_PATTERNS = {
+    # NOTE: Order matters for DEPTH - MD is prioritized over TVD/TVDSS
     CurveType.DEPTH: {
-        'mnemonics': ['DEPT', 'DEPTH', 'DPTH', 'MD', 'TVD', 'TVDSS', 'AHD'],
+        'mnemonics': ['MD', 'DEPT', 'DEPTH', 'DPTH', 'TVD', 'TVDSS', 'AHD'],
         'keywords': ['depth', 'measured', 'vertical'],
         'weight': 1.0
     },
@@ -182,15 +250,16 @@ UNIT_PATTERNS = {
         'typical_range': (0, 300)  # gAPI
     },
     CurveType.RES_DEEP: {
-        'valid_units': ['ohmm', 'ohm.m', 'ohm-m', 'ohmm', 'ohm', 'ohmm2/m'],
+        # Includes all common resistivity unit variations: OHMM, OHM-M, OHM.M, etc.
+        'valid_units': ['ohmm', 'ohm.m', 'ohm-m', 'ohm', 'ohmm2/m', 'OHMM', 'OHM-M', 'OHM.M', 'ohms'],
         'typical_range': (0.1, 10000)  # ohm.m
     },
     CurveType.RES_MED: {
-        'valid_units': ['ohmm', 'ohm.m', 'ohm-m', 'ohmm', 'ohm', 'ohmm2/m'],
+        'valid_units': ['ohmm', 'ohm.m', 'ohm-m', 'ohm', 'ohmm2/m', 'OHMM', 'OHM-M', 'OHM.M', 'ohms'],
         'typical_range': (0.1, 10000)
     },
     CurveType.RES_SHAL: {
-        'valid_units': ['ohmm', 'ohm.m', 'ohm-m', 'ohmm', 'ohm', 'ohmm2/m'],
+        'valid_units': ['ohmm', 'ohm.m', 'ohm-m', 'ohm', 'ohmm2/m', 'OHMM', 'OHM-M', 'OHM.M', 'ohms'],
         'typical_range': (0.1, 10000)
     },
     CurveType.DENS: {
@@ -198,8 +267,10 @@ UNIT_PATTERNS = {
         'typical_range': (1.0, 3.5)  # g/cc
     },
     CurveType.NEUT: {
-        'valid_units': ['v/v', 'pu', '%', 'frac', 'dec', 'm3/m3'],
-        'typical_range': (-0.15, 0.60)  # v/v or fractional
+        # Supports both decimal (v/v) and percentage (%, PU) units
+        'valid_units': ['v/v', 'pu', 'PU', '%', 'frac', 'dec', 'm3/m3', 'percent'],
+        'typical_range': (-0.15, 0.60),  # v/v or fractional
+        'percentage_range': (-15, 60)    # For % or PU units
     },
     CurveType.SONIC: {
         'valid_units': ['us/ft', 'us/m', 'usec/ft', 'usec/m', 'µs/ft', 'µs/m'],
@@ -226,7 +297,9 @@ PHYSICAL_RANGES = {
     CurveType.RES_MED: {'min': 0.01, 'max': 100000, 'typical_min': 0.1, 'typical_max': 2000},
     CurveType.RES_SHAL: {'min': 0.01, 'max': 100000, 'typical_min': 0.1, 'typical_max': 2000},
     CurveType.DENS: {'min': 1.0, 'max': 3.5, 'typical_min': 1.9, 'typical_max': 3.0},
-    CurveType.NEUT: {'min': -0.20, 'max': 1.0, 'typical_min': -0.05, 'typical_max': 0.45},
+    # NEUT ranges depend on unit: v/v uses decimals, % and PU use percentages
+    CurveType.NEUT: {'min': -0.20, 'max': 1.0, 'typical_min': -0.05, 'typical_max': 0.45,
+                     'min_pct': -20, 'max_pct': 100, 'typical_min_pct': -5, 'typical_max_pct': 45},
     CurveType.SONIC: {'min': 30, 'max': 250, 'typical_min': 40, 'typical_max': 140},
     CurveType.CALIPER: {'min': 0, 'max': 30, 'typical_min': 6, 'typical_max': 18},
     CurveType.SP: {'min': -500, 'max': 500, 'typical_min': -200, 'typical_max': 50},
@@ -351,53 +424,70 @@ class CurveIdentifier:
         file_context: dict,
         tool_context: ToolContext
     ) -> CurveIdentificationResult:
-        """Identify a single curve using all applicable layers."""
+        """
+        Identify a single curve using robust point-based scoring.
+        
+        Uses explicit weights from SCORE_WEIGHTS for transparent scoring:
+        - Unit: 40 pts
+        - Range: 25 pts  
+        - Description: 15 pts
+        - Mnemonic: 10 pts
+        - Coverage: 0-10 pts (scaled)
+        """
         
         mnemonic = curve.mnemonic
         unit = curve.unit
         description = curve.descr
-        data = curve.data
+        data = _ensure_array(curve.data)  # Fix scalar bug
         
         layer_results = []
-        type_scores: Dict[CurveType, float] = {ct: 0.0 for ct in CurveType}
         
-        # Layer 0: File & Context (already processed)
+        # Track scores per curve type using point-based system
+        type_scores: Dict[CurveType, float] = {ct: 0.0 for ct in CurveType}
+        type_score_breakdown: Dict[CurveType, Dict[str, float]] = {
+            ct: {"unit": 0, "range": 0, "description": 0, "mnemonic": 0, "coverage": 0}
+            for ct in CurveType
+        }
+        
+        # Layer 0: File & Context (metadata only)
         layer_results.append(LayerResult(
             layer_name="File & Context",
             layer_number=0,
-            confidence_contribution=self.layer_weights[0],
+            confidence_contribution=0,
             identified_type=None,
             reasoning=f"File type: {file_context['type']}",
             passed=True
         ))
         
-        # Layer 1: Header Reading
-        l1_result = self._layer_1_header_reading(description, mnemonic)
+        # Layer 1 & 2: Header/Description Keyword Matching (+15 pts max)
+        l1_result, desc_matches = self._layer_1_2_description_scoring(description, mnemonic)
         layer_results.append(l1_result)
-        if l1_result.identified_type:
-            type_scores[l1_result.identified_type] += l1_result.confidence_contribution
+        for ct in desc_matches:
+            type_scores[ct] += SCORE_WEIGHTS["description"]
+            type_score_breakdown[ct]["description"] = SCORE_WEIGHTS["description"]
         
-        # Layer 2: Keyword / NLP
-        l2_result = self._layer_2_keyword_nlp(mnemonic, description)
-        layer_results.append(l2_result)
-        for ct, score in l2_result.identified_type or []:
-            type_scores[ct] += score * self.layer_weights[2]
-        
-        # Layer 3: Mnemonic Matching
-        l3_result = self._layer_3_mnemonic_matching(mnemonic)
+        # Layer 3: Mnemonic Matching (+10 pts for exact, +5 for partial)
+        l3_result, mnem_match, mnem_score = self._layer_3_mnemonic_scoring(mnemonic)
         layer_results.append(l3_result)
-        if l3_result.identified_type:
-            type_scores[l3_result.identified_type] += l3_result.confidence_contribution
+        if mnem_match:
+            type_scores[mnem_match] += mnem_score
+            type_score_breakdown[mnem_match]["mnemonic"] = mnem_score
         
-        # Layer 4: Unit Validation
-        l4_result = self._layer_4_unit_validation(unit, type_scores)
+        # Layer 4: Unit Validation (+40 pts for valid unit match)
+        l4_result, unit_matches = self._layer_4_unit_scoring(unit)
         layer_results.append(l4_result)
+        for ct in unit_matches:
+            type_scores[ct] += SCORE_WEIGHTS["unit"]
+            type_score_breakdown[ct]["unit"] = SCORE_WEIGHTS["unit"]
         
-        # Layer 5: Physical Range
-        l5_result = self._layer_5_physical_range(data, type_scores)
+        # Layer 5: Physical Range Validation (+25 pts if in range)
+        l5_result, range_matches = self._layer_5_range_scoring(data)
         layer_results.append(l5_result)
+        for ct, pts in range_matches.items():
+            type_scores[ct] += pts
+            type_score_breakdown[ct]["range"] = pts
         
-        # Layer 6: Statistical Shape
+        # Layer 6: Statistical Shape (boost existing scores)
         l6_result = self._layer_6_statistical_shape(data, type_scores)
         layer_results.append(l6_result)
         
@@ -407,41 +497,54 @@ class CurveIdentifier:
         )
         layer_results.append(l7_result)
         
-        # Layer 10: Calculate final confidence
+        # Coverage Scoring (+0-10 pts based on data quality)
+        coverage_ratio = _calculate_coverage(data)
+        coverage_score = SCORE_WEIGHTS["coverage"] * coverage_ratio
+        for ct in type_scores:
+            if type_scores[ct] > 0:  # Only add coverage to candidates
+                type_scores[ct] += coverage_score
+                type_score_breakdown[ct]["coverage"] = coverage_score
+        
+        # Find best match
         best_type = max(type_scores, key=type_scores.get)
-        best_score = type_scores[best_type]
+        best_raw_score = type_scores[best_type]
         
-        # Normalize confidence to 0-1 range
-        confidence = min(1.0, max(0.0, best_score))
+        # Convert raw score to confidence (0-1 range, max 100 pts)
+        confidence = min(1.0, max(0.0, best_raw_score / 100.0))
         
-        # If confidence is too low, mark as unknown
-        if confidence < 0.15:
+        # If score is too low, mark as unknown
+        if best_raw_score < MIN_CONFIDENCE_THRESHOLD:
             best_type = CurveType.UNKNOWN
         
-        # Build alternatives
+        # Build alternatives (other candidates with scores)
         alternatives = [
-            (ct, score) for ct, score in sorted(
+            (ct, score / 100.0) for ct, score in sorted(
                 type_scores.items(), key=lambda x: -x[1]
-            ) if ct != best_type and score > 0.1
+            ) if ct != best_type and score >= MIN_CONFIDENCE_THRESHOLD
         ][:3]
         
-        # Generate explanation
-        explanation = self._generate_explanation(layer_results, best_type, confidence)
+        # Generate explanation with score breakdown
+        explanation = self._generate_explanation_with_scores(
+            layer_results, best_type, best_raw_score, type_score_breakdown.get(best_type, {})
+        )
         
         # Layer 11: Check learning exceptions
         if mnemonic in self.learning_exceptions:
             learned_type = self.learning_exceptions[mnemonic]
             explanation += f" [Override from learned exception: {learned_type.value}]"
             best_type = learned_type
-            confidence = max(confidence, 0.9)
+            best_raw_score = 95  # High score for learned
+            confidence = 0.95
         
         return CurveIdentificationResult(
             original_mnemonic=mnemonic,
             identified_type=best_type,
             confidence_score=confidence,
+            raw_score=best_raw_score,
             layer_results=layer_results,
             explanation=explanation,
-            alternative_types=alternatives
+            alternative_types=alternatives,
+            score_breakdown=type_score_breakdown.get(best_type, {})
         )
     
     def _layer_0_file_context(self, las, file_type: FileType) -> dict:
@@ -452,6 +555,239 @@ class CurveIdentifier:
             'has_header': bool(las.well),
         }
         return context
+    
+    # =========================================================================
+    # NEW POINT-BASED SCORING METHODS
+    # =========================================================================
+    
+    def _layer_1_2_description_scoring(
+        self, description: str, mnemonic: str
+    ) -> Tuple[LayerResult, List[CurveType]]:
+        """
+        Layer 1 & 2: Description/keyword scoring (+15 pts).
+        
+        Returns:
+            Tuple of (LayerResult, list of matched CurveTypes)
+        """
+        combined_text = f"{mnemonic} {description or ''}".lower()
+        
+        # Keywords that indicate curve type
+        keyword_patterns = {
+            CurveType.GR: ['gamma', 'gr ', 'natural radioactivity', 'gapi'],
+            CurveType.RES_DEEP: ['deep resistivity', 'true resistivity', 'formation resistivity', 
+                                 'deep induction', 'laterolog deep'],
+            CurveType.RES_MED: ['medium resistivity', 'intermediate', 'medium induction'],
+            CurveType.RES_SHAL: ['shallow resistivity', 'invaded zone', 'flushed', 'microsphere'],
+            CurveType.DENS: ['bulk density', 'formation density', 'density log', 'rhob'],
+            CurveType.NEUT: ['neutron porosity', 'thermal neutron', 'hydrogen index', 'nphi'],
+            CurveType.SONIC: ['sonic', 'acoustic', 'compressional slowness', 'transit time'],
+            CurveType.CALIPER: ['caliper', 'borehole size', 'hole diameter', 'bit size'],
+            CurveType.SP: ['spontaneous potential', 'self potential'],
+            CurveType.PEF: ['photoelectric', 'pe factor', 'pef'],
+            CurveType.DEPTH: ['measured depth', 'true vertical', 'depth'],
+        }
+        
+        matches = []
+        matched_keywords = []
+        
+        for curve_type, keywords in keyword_patterns.items():
+            for keyword in keywords:
+                if keyword in combined_text:
+                    if curve_type not in matches:
+                        matches.append(curve_type)
+                        matched_keywords.append(keyword)
+                    break
+        
+        return LayerResult(
+            layer_name="Description/Keyword",
+            layer_number=1,
+            confidence_contribution=SCORE_WEIGHTS["description"] if matches else 0,
+            identified_type=matches[0] if matches else None,
+            reasoning=f"Keywords found: {matched_keywords[:3]}" if matches else "No keyword match",
+            passed=len(matches) > 0
+        ), matches
+    
+    def _layer_3_mnemonic_scoring(
+        self, mnemonic: str
+    ) -> Tuple[LayerResult, Optional[CurveType], float]:
+        """
+        Layer 3: Mnemonic scoring (+10 pts exact, +5 pts partial).
+        
+        Returns:
+            Tuple of (LayerResult, matched CurveType or None, score points)
+        """
+        mnemonic_upper = mnemonic.upper().strip()
+        
+        # Check exact match first (10 points)
+        for curve_type, config in CURVE_PATTERNS.items():
+            for std_mnemonic in config['mnemonics']:
+                if mnemonic_upper == std_mnemonic.upper():
+                    return LayerResult(
+                        layer_name="Mnemonic Match",
+                        layer_number=3,
+                        confidence_contribution=SCORE_WEIGHTS["mnemonic"],
+                        identified_type=curve_type,
+                        reasoning=f"Exact match: {mnemonic} = {std_mnemonic}",
+                        passed=True
+                    ), curve_type, SCORE_WEIGHTS["mnemonic"]
+        
+        # Check partial match (5 points)
+        best_match = None
+        best_similarity = 0
+        
+        for curve_type, config in CURVE_PATTERNS.items():
+            for std_mnemonic in config['mnemonics']:
+                std_upper = std_mnemonic.upper()
+                # Check if one contains the other
+                if std_upper in mnemonic_upper or mnemonic_upper in std_upper:
+                    similarity = len(std_mnemonic) / max(len(mnemonic), len(std_mnemonic))
+                    if similarity > best_similarity:
+                        best_similarity = similarity
+                        best_match = curve_type
+        
+        if best_match and best_similarity > 0.4:
+            partial_score = SCORE_WEIGHTS["mnemonic"] * 0.5  # 5 pts for partial
+            return LayerResult(
+                layer_name="Mnemonic Match",
+                layer_number=3,
+                confidence_contribution=partial_score,
+                identified_type=best_match,
+                reasoning=f"Partial match: {mnemonic} (similarity: {best_similarity:.0%})",
+                passed=True
+            ), best_match, partial_score
+        
+        return LayerResult(
+            layer_name="Mnemonic Match",
+            layer_number=3,
+            confidence_contribution=0,
+            identified_type=None,
+            reasoning=f"No mnemonic match for: {mnemonic}",
+            passed=False
+        ), None, 0
+    
+    def _layer_4_unit_scoring(self, unit: str) -> Tuple[LayerResult, List[CurveType]]:
+        """
+        Layer 4: Unit validation scoring (+40 pts).
+        
+        Returns:
+            Tuple of (LayerResult, list of CurveTypes with matching units)
+        """
+        unit_cleaned = _clean_unit(unit)
+        
+        if not unit_cleaned:
+            return LayerResult(
+                layer_name="Unit Validation",
+                layer_number=4,
+                confidence_contribution=0,
+                identified_type=None,
+                reasoning="No unit specified",
+                passed=False
+            ), []
+        
+        matches = []
+        
+        for curve_type, config in UNIT_PATTERNS.items():
+            valid_units = [_clean_unit(u) for u in config['valid_units']]
+            # Check if unit matches any valid unit
+            for valid_unit in valid_units:
+                if valid_unit and (valid_unit in unit_cleaned or unit_cleaned in valid_unit):
+                    matches.append(curve_type)
+                    break
+        
+        return LayerResult(
+            layer_name="Unit Validation",
+            layer_number=4,
+            confidence_contribution=SCORE_WEIGHTS["unit"] if matches else 0,
+            identified_type=matches[0] if matches else None,
+            reasoning=f"Unit '{unit}' matches: {[ct.value for ct in matches]}" if matches else f"Unit '{unit}' not recognized",
+            passed=len(matches) > 0
+        ), matches
+    
+    def _layer_5_range_scoring(
+        self, data: np.ndarray
+    ) -> Tuple[LayerResult, Dict[CurveType, float]]:
+        """
+        Layer 5: Physical range validation scoring (+25 pts typical, +15 pts physical).
+        
+        Uses 7th/93rd percentile for robust outlier handling.
+        
+        Returns:
+            Tuple of (LayerResult, dict of CurveType -> score points)
+        """
+        data = _ensure_array(data)
+        pr = _percentile_range(data)
+        
+        if pr is None:
+            return LayerResult(
+                layer_name="Physical Range",
+                layer_number=5,
+                confidence_contribution=0,
+                identified_type=None,
+                reasoning="Insufficient valid data for range check",
+                passed=False
+            ), {}
+        
+        data_low, data_high = pr
+        data_mean = np.nanmean(data)
+        
+        matches = {}
+        reasoning_parts = []
+        
+        for curve_type, ranges in PHYSICAL_RANGES.items():
+            phys_min = ranges['min']
+            phys_max = ranges['max']
+            typ_min = ranges['typical_min']
+            typ_max = ranges['typical_max']
+            
+            # Check if data is within physical limits
+            if phys_min <= data_low and data_high <= phys_max:
+                # Check if data is within typical range (full points)
+                if typ_min <= data_mean <= typ_max:
+                    matches[curve_type] = SCORE_WEIGHTS["range"]  # 25 pts
+                    reasoning_parts.append(f"{curve_type.value}:TYPICAL")
+                else:
+                    # Within physical but not typical (partial points)
+                    matches[curve_type] = SCORE_WEIGHTS["range"] * 0.6  # 15 pts
+                    reasoning_parts.append(f"{curve_type.value}:PHYSICAL")
+        
+        best_match = max(matches, key=matches.get) if matches else None
+        
+        return LayerResult(
+            layer_name="Physical Range",
+            layer_number=5,
+            confidence_contribution=matches.get(best_match, 0) if best_match else 0,
+            identified_type=best_match,
+            reasoning=f"Range [{data_low:.2f}, {data_high:.2f}], mean={data_mean:.2f}. Matches: {reasoning_parts[:3]}",
+            passed=len(matches) > 0
+        ), matches
+    
+    def _generate_explanation_with_scores(
+        self, 
+        layer_results: List[LayerResult],
+        identified_type: CurveType,
+        raw_score: float,
+        score_breakdown: Dict[str, float]
+    ) -> str:
+        """Generate human-readable explanation with score breakdown."""
+        if identified_type == CurveType.UNKNOWN:
+            return f"Could not identify curve (score: {raw_score:.0f}/100). Low confidence across all layers."
+        
+        # Build score breakdown string
+        breakdown_parts = []
+        for category, pts in score_breakdown.items():
+            if pts > 0:
+                breakdown_parts.append(f"{category}:{pts:.0f}")
+        
+        passed_layers = [lr for lr in layer_results if lr.passed]
+        key_reasons = [lr.reasoning for lr in passed_layers[:2]]
+        
+        explanation = f"Identified as {identified_type.value} (score: {raw_score:.0f}/100). "
+        if breakdown_parts:
+            explanation += f"Points: {', '.join(breakdown_parts)}. "
+        if key_reasons:
+            explanation += f"Evidence: {'; '.join(key_reasons)}"
+        
+        return explanation
     
     def _layer_1_header_reading(self, description: str, mnemonic: str) -> LayerResult:
         """Layer 1: Extract human intent from curve description."""
@@ -645,6 +981,11 @@ class CurveIdentifier:
         current_scores: Dict[CurveType, float]
     ) -> LayerResult:
         """Layer 6: Identify curve behavior patterns using statistics."""
+        data = _ensure_array(data)  # Fix scalar bug
+        # Replace null values before analysis
+        data = data.astype(float)
+        for null_val in NULL_VALUES:
+            data = np.where(data == null_val, np.nan, data)
         valid_data = data[~np.isnan(data)]
         if len(valid_data) < 10:
             return LayerResult(
@@ -773,13 +1114,13 @@ class CurveIdentifier:
         
         for mnemonic, result in curve_results.items():
             if result.identified_type == CurveType.GR:
-                gr_curve = las[mnemonic].data
+                gr_curve = _ensure_array(las[mnemonic].data)
             elif result.identified_type == CurveType.RES_DEEP:
-                res_curve = las[mnemonic].data
+                res_curve = _ensure_array(las[mnemonic].data)
             elif result.identified_type == CurveType.DENS:
-                dens_curve = las[mnemonic].data
+                dens_curve = _ensure_array(las[mnemonic].data)
             elif result.identified_type == CurveType.NEUT:
-                neut_curve = las[mnemonic].data
+                neut_curve = _ensure_array(las[mnemonic].data)
         
         # Check GR-Resistivity relationship (High GR + Low Rt → Shale)
         if gr_curve is not None and res_curve is not None:

@@ -2178,3 +2178,477 @@ def create_overlay_plot(
     
     plt.tight_layout()
     return fig
+
+
+# =============================================================================
+# ROCK CLASSIFICATION VISUALIZATION FUNCTIONS
+# =============================================================================
+
+def create_facies_log_display(
+    df,
+    cluster_labels,
+    cluster_interpretations=None,
+    mapping=None,
+    header_info=None,
+    settings=None,
+    facies_colors=None
+):
+    """
+    Create a professional log display with facies classification track.
+    
+    Shows the standard well log curves alongside a color-coded facies/lithology
+    track based on clustering results.
+    
+    Args:
+        df: DataFrame with well log data (must include 'DEPTH')
+        cluster_labels: Array of cluster assignments for each sample
+        cluster_interpretations: Dict mapping cluster ID to rock type name
+        mapping: Curve mapping dictionary
+        header_info: Well header information
+        settings: Plot settings
+        facies_colors: Optional list of colors for each cluster
+        
+    Returns:
+        Matplotlib figure
+    """
+    if settings is None:
+        settings = {}
+    if mapping is None:
+        mapping = {}
+    
+    # Get depth data
+    depth = df['DEPTH'].values
+    depth_min = np.nanmin(depth)
+    depth_max = np.nanmax(depth)
+    depth_range = depth_max - depth_min
+    
+    # Calculate figure dimensions
+    scale_ratio = settings.get('scale_ratio', 500)
+    depth_unit = settings.get('depth_unit', 'm')
+    height_cm = (depth_range * 100) / scale_ratio
+    height_in = max(8, min(25, height_cm / 2.54))
+    
+    # Create figure: Depth + Facies + GR + D-N tracks
+    fig = plt.figure(figsize=(12, height_in), facecolor='white')
+    
+    # GridSpec layout
+    if header_info:
+        gs = gridspec.GridSpec(2, 5, figure=fig,
+                               height_ratios=[0.06, 0.94],
+                               width_ratios=[0.6, 1.2, 2.5, 2.5, 2.5],
+                               wspace=0.02, hspace=0.02)
+        ax_header = fig.add_subplot(gs[0, :])
+        _draw_well_header(ax_header, header_info, depth_unit)
+        
+        ax_depth = fig.add_subplot(gs[1, 0])
+        ax_facies = fig.add_subplot(gs[1, 1], sharey=ax_depth)
+        ax_gr = fig.add_subplot(gs[1, 2], sharey=ax_depth)
+        ax_dn = fig.add_subplot(gs[1, 3], sharey=ax_depth)
+        ax_curves = fig.add_subplot(gs[1, 4], sharey=ax_depth)
+    else:
+        gs = gridspec.GridSpec(1, 5, figure=fig,
+                               width_ratios=[0.6, 1.2, 2.5, 2.5, 2.5],
+                               wspace=0.02)
+        ax_depth = fig.add_subplot(gs[0, 0])
+        ax_facies = fig.add_subplot(gs[0, 1], sharey=ax_depth)
+        ax_gr = fig.add_subplot(gs[0, 2], sharey=ax_depth)
+        ax_dn = fig.add_subplot(gs[0, 3], sharey=ax_depth)
+        ax_curves = fig.add_subplot(gs[0, 4], sharey=ax_depth)
+    
+    # Draw depth track
+    _draw_depth_track(ax_depth, depth, depth_min, depth_max, depth_unit)
+    
+    # =========================================================================
+    # FACIES TRACK (color-coded lithology)
+    # =========================================================================
+    ax_facies.set_facecolor('#f8f9fa')
+    ax_facies.set_title("FACIES\n(Lithology)", fontsize=9, fontweight='bold', pad=8)
+    ax_facies.set_xlim(0, 1)
+    
+    # Get unique clusters
+    unique_clusters = np.unique(cluster_labels[cluster_labels >= 0])
+    n_clusters = len(unique_clusters)
+    
+    # Default colors if not provided
+    if facies_colors is None:
+        if n_clusters == 2:
+            facies_colors = ['#FFD700', '#708090']  # Gold (Sand), SlateGray (Shale)
+        elif n_clusters == 3:
+            facies_colors = ['#FFD700', '#DAA520', '#708090']
+        else:
+            import matplotlib.cm as cm
+            cmap = cm.get_cmap('Spectral')
+            facies_colors = [f'#{int(c[0]*255):02x}{int(c[1]*255):02x}{int(c[2]*255):02x}' 
+                           for c in cmap(np.linspace(0.1, 0.9, n_clusters))]
+    
+    # Draw facies blocks
+    for i in range(len(depth) - 1):
+        label = cluster_labels[i]
+        if label >= 0 and label < len(facies_colors):
+            color = facies_colors[label]
+            ax_facies.axhspan(depth[i], depth[i+1], color=color, alpha=0.9)
+    
+    # Remove x-axis
+    ax_facies.xaxis.set_visible(False)
+    plt.setp(ax_facies.get_yticklabels(), visible=False)
+    
+    # Add legend
+    legend_handles = []
+    for cluster_id in unique_clusters:
+        if cluster_id < len(facies_colors):
+            label = cluster_interpretations.get(cluster_id, f"Facies {cluster_id+1}") if cluster_interpretations else f"Facies {cluster_id+1}"
+            legend_handles.append(mpatches.Patch(color=facies_colors[cluster_id], label=label))
+    
+    if legend_handles:
+        ax_facies.legend(handles=legend_handles, loc='lower center', fontsize=6,
+                        framealpha=0.95, edgecolor=COLORS['BORDER'],
+                        bbox_to_anchor=(0.5, 0.02))
+    
+    for spine in ax_facies.spines.values():
+        spine.set_color(COLORS['BORDER'])
+        spine.set_linewidth(1)
+    
+    # =========================================================================
+    # GR TRACK
+    # =========================================================================
+    _draw_gr_track(ax_gr, df, mapping, depth, settings, show_fill=False)
+    plt.setp(ax_gr.get_yticklabels(), visible=False)
+    
+    # =========================================================================
+    # DENSITY-NEUTRON TRACK
+    # =========================================================================
+    _draw_density_neutron_track(ax_dn, df, mapping, depth, settings, show_crossover=True)
+    plt.setp(ax_dn.get_yticklabels(), visible=False)
+    
+    # =========================================================================
+    # ADDITIONAL CURVES TRACK (show clustering features)
+    # =========================================================================
+    ax_curves.set_facecolor(COLORS['TRACK_BG'])
+    ax_curves.set_title("CLUSTER\nFEATURES", fontsize=9, fontweight='bold', pad=8)
+    
+    # Plot some common curves if available
+    curve_colors = ['#e11d48', '#0ea5e9', '#22c55e', '#f59e0b']
+    curves_plotted = []
+    for col in ['DT', 'SONIC', 'DTC', 'RT', 'RLLD', 'PE']:
+        if col in df.columns and len(curves_plotted) < 3:
+            curves_plotted.append(col)
+    
+    if curves_plotted:
+        for i, col in enumerate(curves_plotted):
+            data = df[col].values.copy()
+            # Normalize for overlay
+            valid = ~np.isnan(data)
+            if np.sum(valid) > 0:
+                data_norm = (data - np.nanmin(data)) / (np.nanmax(data) - np.nanmin(data) + 1e-10)
+                ax_curves.plot(data_norm, depth, color=curve_colors[i], linewidth=1.2, label=col)
+        
+        ax_curves.set_xlim(-0.1, 1.1)
+        ax_curves.legend(loc='lower right', fontsize=6, framealpha=0.9)
+    else:
+        ax_curves.text(0.5, 0.5, "No additional\ncurves", transform=ax_curves.transAxes,
+                      ha='center', va='center', fontsize=9, color='gray')
+    
+    ax_curves.xaxis.set_label_position('top')
+    ax_curves.xaxis.tick_top()
+    ax_curves.set_xlabel("Normalized", fontsize=8, fontweight='bold')
+    ax_curves.xaxis.grid(True, linestyle='-', linewidth=0.5, color=COLORS['GRID'], alpha=0.7)
+    ax_curves.yaxis.grid(True, linestyle='-', linewidth=0.5, color=COLORS['GRID'], alpha=0.7)
+    plt.setp(ax_curves.get_yticklabels(), visible=False)
+    
+    for spine in ax_curves.spines.values():
+        spine.set_color(COLORS['BORDER'])
+        spine.set_linewidth(1)
+    
+    # Set depth limits
+    ax_depth.set_ylim(depth_max, depth_min)
+    
+    plt.tight_layout()
+    return fig
+
+
+def create_cluster_crossplot(
+    df,
+    x_column,
+    y_column,
+    cluster_labels,
+    cluster_interpretations=None,
+    facies_colors=None,
+    title=None,
+    show_density=True
+):
+    """
+    Create a crossplot with cluster coloring.
+    
+    Args:
+        df: DataFrame with well log data
+        x_column: Column name for x-axis
+        y_column: Column name for y-axis
+        cluster_labels: Array of cluster assignments
+        cluster_interpretations: Dict mapping cluster ID to rock type name
+        facies_colors: Optional list of colors
+        title: Plot title
+        show_density: Whether to show density contours
+        
+    Returns:
+        Matplotlib figure
+    """
+    fig, ax = plt.subplots(figsize=(10, 8), facecolor='white')
+    
+    # Get data
+    x_data = df[x_column].values if x_column in df.columns else None
+    y_data = df[y_column].values if y_column in df.columns else None
+    
+    if x_data is None or y_data is None:
+        ax.text(0.5, 0.5, "Missing data columns", ha='center', va='center', 
+               transform=ax.transAxes, fontsize=12)
+        return fig
+    
+    # Filter valid data
+    valid_mask = ~np.isnan(x_data) & ~np.isnan(y_data) & (cluster_labels >= 0)
+    x_valid = x_data[valid_mask]
+    y_valid = y_data[valid_mask]
+    labels_valid = cluster_labels[valid_mask]
+    
+    unique_clusters = np.unique(labels_valid)
+    n_clusters = len(unique_clusters)
+    
+    # Default colors
+    if facies_colors is None:
+        if n_clusters == 2:
+            facies_colors = ['#FFD700', '#708090']
+        elif n_clusters == 3:
+            facies_colors = ['#FFD700', '#DAA520', '#708090']
+        else:
+            import matplotlib.cm as cm
+            cmap = cm.get_cmap('Spectral')
+            facies_colors = [f'#{int(c[0]*255):02x}{int(c[1]*255):02x}{int(c[2]*255):02x}' 
+                           for c in cmap(np.linspace(0.1, 0.9, n_clusters))]
+    
+    # Plot each cluster
+    scatter_handles = []
+    for cluster_id in unique_clusters:
+        mask = labels_valid == cluster_id
+        color = facies_colors[int(cluster_id)] if int(cluster_id) < len(facies_colors) else '#808080'
+        label = cluster_interpretations.get(cluster_id, f"Facies {cluster_id+1}") if cluster_interpretations else f"Facies {cluster_id+1}"
+        
+        scatter = ax.scatter(x_valid[mask], y_valid[mask], c=color, s=20, alpha=0.6,
+                           edgecolors='white', linewidths=0.3, label=label)
+        scatter_handles.append(scatter)
+        
+        # Add cluster centroid marker
+        centroid_x = np.mean(x_valid[mask])
+        centroid_y = np.mean(y_valid[mask])
+        ax.scatter(centroid_x, centroid_y, c=color, s=200, marker='*',
+                  edgecolors='black', linewidths=1.5, zorder=10)
+    
+    # Styling
+    ax.set_xlabel(x_column, fontsize=12, fontweight='bold')
+    ax.set_ylabel(y_column, fontsize=12, fontweight='bold')
+    
+    if title:
+        ax.set_title(title, fontsize=14, fontweight='bold', pad=15)
+    else:
+        ax.set_title(f"Rock Type Classification: {x_column} vs {y_column}", 
+                    fontsize=14, fontweight='bold', pad=15)
+    
+    ax.grid(True, linestyle='--', alpha=0.4)
+    ax.legend(loc='upper right', fontsize=10, framealpha=0.95)
+    
+    # Add statistics annotation
+    stats_text = f"n = {len(x_valid):,} samples\n{n_clusters} rock types identified"
+    ax.text(0.02, 0.98, stats_text, transform=ax.transAxes, fontsize=9,
+           verticalalignment='top', bbox=dict(boxstyle='round', facecolor='white', alpha=0.9))
+    
+    plt.tight_layout()
+    return fig
+
+
+def create_3d_cluster_scatter(
+    df,
+    feature_columns,
+    cluster_labels,
+    cluster_interpretations=None,
+    facies_colors=None,
+    title="3D Rock Type Classification"
+):
+    """
+    Create an interactive 3D scatter plot using Plotly.
+    
+    Args:
+        df: DataFrame with well log data
+        feature_columns: List of 3 column names for x, y, z axes
+        cluster_labels: Array of cluster assignments
+        cluster_interpretations: Dict mapping cluster ID to rock type name
+        facies_colors: Optional list of colors
+        title: Plot title
+        
+    Returns:
+        Plotly figure object
+    """
+    try:
+        import plotly.graph_objects as go
+    except ImportError:
+        return None
+    
+    if len(feature_columns) < 3:
+        return None
+    
+    x_col, y_col, z_col = feature_columns[:3]
+    
+    # Get data
+    if x_col not in df.columns or y_col not in df.columns or z_col not in df.columns:
+        return None
+    
+    x_data = df[x_col].values
+    y_data = df[y_col].values
+    z_data = df[z_col].values
+    
+    # Filter valid
+    valid_mask = ~np.isnan(x_data) & ~np.isnan(y_data) & ~np.isnan(z_data) & (cluster_labels >= 0)
+    x_valid = x_data[valid_mask]
+    y_valid = y_data[valid_mask]
+    z_valid = z_data[valid_mask]
+    labels_valid = cluster_labels[valid_mask]
+    
+    unique_clusters = np.unique(labels_valid)
+    n_clusters = len(unique_clusters)
+    
+    # Default colors
+    if facies_colors is None:
+        if n_clusters == 2:
+            facies_colors = ['#FFD700', '#708090']
+        elif n_clusters == 3:
+            facies_colors = ['#FFD700', '#DAA520', '#708090']
+        else:
+            import matplotlib.cm as cm
+            cmap = cm.get_cmap('Spectral')
+            facies_colors = [mpl_color_to_hex(cmap(i / max(1, n_clusters - 1)))
+                           for i in range(n_clusters)]
+    
+    # Create traces for each cluster
+    traces = []
+    for cluster_id in unique_clusters:
+        mask = labels_valid == cluster_id
+        color = facies_colors[int(cluster_id)] if int(cluster_id) < len(facies_colors) else '#808080'
+        label = cluster_interpretations.get(cluster_id, f"Facies {cluster_id+1}") if cluster_interpretations else f"Facies {cluster_id+1}"
+        
+        trace = go.Scatter3d(
+            x=x_valid[mask],
+            y=y_valid[mask],
+            z=z_valid[mask],
+            mode='markers',
+            name=label,
+            marker=dict(
+                size=4,
+                color=color,
+                opacity=0.7,
+                line=dict(width=0.5, color='white')
+            ),
+            hovertemplate=f"<b>{label}</b><br>" +
+                         f"{x_col}: %{{x:.2f}}<br>" +
+                         f"{y_col}: %{{y:.2f}}<br>" +
+                         f"{z_col}: %{{z:.2f}}<extra></extra>"
+        )
+        traces.append(trace)
+    
+    # Create figure
+    fig = go.Figure(data=traces)
+    
+    # Update layout for dark theme
+    fig.update_layout(
+        title=dict(
+            text=f"<b>{title}</b>",
+            font=dict(size=18, color='#1e293b'),
+            x=0.5
+        ),
+        scene=dict(
+            xaxis=dict(title=x_col, backgroundcolor='#f1f5f9', gridcolor='#cbd5e1'),
+            yaxis=dict(title=y_col, backgroundcolor='#f1f5f9', gridcolor='#cbd5e1'),
+            zaxis=dict(title=z_col, backgroundcolor='#f1f5f9', gridcolor='#cbd5e1'),
+            bgcolor='white'
+        ),
+        legend=dict(
+            yanchor="top",
+            y=0.99,
+            xanchor="left",
+            x=0.01,
+            bgcolor='rgba(255,255,255,0.9)',
+            bordercolor='#64748b',
+            borderwidth=1
+        ),
+        margin=dict(l=0, r=0, t=50, b=0),
+        paper_bgcolor='white',
+        height=600
+    )
+    
+    return fig
+
+
+def mpl_color_to_hex(rgba):
+    """Convert matplotlib RGBA tuple to hex string."""
+    return f'#{int(rgba[0]*255):02x}{int(rgba[1]*255):02x}{int(rgba[2]*255):02x}'
+
+
+def create_cluster_quality_plot(k_analysis, selected_k=None):
+    """
+    Create a plot showing cluster quality metrics for K selection.
+    
+    Args:
+        k_analysis: Dictionary from find_optimal_clusters()
+        selected_k: The K value that was selected
+        
+    Returns:
+        Matplotlib figure
+    """
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 5), facecolor='white')
+    
+    k_range = k_analysis['k_range']
+    inertias = k_analysis['inertias']
+    silhouettes = k_analysis['silhouette_scores']
+    
+    # Elbow plot
+    ax1.plot(k_range, inertias, 'b-o', linewidth=2, markersize=8)
+    ax1.set_xlabel('Number of Clusters (K)', fontsize=11, fontweight='bold')
+    ax1.set_ylabel('Inertia (WCSS)', fontsize=11, fontweight='bold')
+    ax1.set_title('Elbow Method', fontsize=13, fontweight='bold', pad=10)
+    ax1.grid(True, linestyle='--', alpha=0.4)
+    
+    if selected_k:
+        ax1.axvline(x=selected_k, color='#ef4444', linestyle='--', linewidth=2, 
+                   label=f'Selected K = {selected_k}')
+        ax1.legend(fontsize=10)
+    
+    # Highlight elbow point
+    elbow_k = k_analysis.get('optimal_k_elbow', k_range[0])
+    elbow_idx = k_range.index(elbow_k) if elbow_k in k_range else 0
+    ax1.scatter([elbow_k], [inertias[elbow_idx]], s=150, c='#f59e0b', 
+               marker='D', zorder=5, label='Elbow Point')
+    
+    # Silhouette plot
+    colors = ['#22c55e' if s == max(silhouettes) else '#3b82f6' for s in silhouettes]
+    bars = ax2.bar(k_range, silhouettes, color=colors, edgecolor='white', linewidth=1.5)
+    ax2.set_xlabel('Number of Clusters (K)', fontsize=11, fontweight='bold')
+    ax2.set_ylabel('Silhouette Score', fontsize=11, fontweight='bold')
+    ax2.set_title('Silhouette Analysis', fontsize=13, fontweight='bold', pad=10)
+    ax2.grid(True, linestyle='--', alpha=0.4, axis='y')
+    
+    # Add value labels on bars
+    for bar, score in zip(bars, silhouettes):
+        ax2.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 0.01,
+                f'{score:.2f}', ha='center', va='bottom', fontsize=9, fontweight='bold')
+    
+    if selected_k and selected_k in k_range:
+        idx = k_range.index(selected_k)
+        bars[idx].set_color('#ef4444')
+        bars[idx].set_edgecolor('#b91c1c')
+        bars[idx].set_linewidth(2)
+    
+    # Add interpretation
+    best_k = k_analysis.get('recommended_k', k_range[np.argmax(silhouettes)])
+    ax2.text(0.02, 0.98, f"Recommended K = {best_k}\n(Highest Silhouette)",
+            transform=ax2.transAxes, fontsize=10, verticalalignment='top',
+            bbox=dict(boxstyle='round', facecolor='#dcfce7', alpha=0.9))
+    
+    plt.tight_layout()
+    return fig
+

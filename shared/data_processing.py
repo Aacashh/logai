@@ -67,6 +67,51 @@ def apply_smoothing(df, window=5, columns=None, exclude=['DEPTH']):
     return df_smooth
 
 
+def normalize_porosity_units(df, las, mapping):
+    """
+    Normalize neutron porosity values from percentage or PU units to v/v (decimal).
+    NPHI in % or PU (0-60) should be converted to v/v (0.00-0.60).
+    
+    Args:
+        df: pandas DataFrame with curve data
+        las: lasio.LASFile object to check units
+        mapping: Curve mapping dictionary
+        
+    Returns:
+        DataFrame with normalized NPHI values
+    """
+    neut_col = mapping.get('NEUT')
+    if not neut_col or neut_col not in df.columns:
+        return df
+    
+    # Get the unit of the neutron curve from the LAS file
+    neut_unit = None
+    try:
+        for curve in las.curves:
+            if curve.mnemonic == neut_col:
+                neut_unit = curve.unit.upper().strip() if curve.unit else None
+                break
+    except:
+        pass
+    
+    if not neut_unit:
+        # Try to detect from data range
+        data = df[neut_col].dropna()
+        if len(data) > 10:
+            data_max = data.quantile(0.95)
+            # If max value > 1, it's likely in percentage
+            if data_max > 1:
+                neut_unit = '%'
+    
+    # Convert if unit is % or PU (percentage units)
+    if neut_unit in ['%', 'PU', 'PERCENT', 'PCT', 'P.U.', 'P.U']:
+        df = df.copy()
+        # Convert from percentage to decimal v/v
+        df[neut_col] = df[neut_col] / 100.0
+    
+    return df
+
+
 def process_data(las, mapping, smooth_window=0):
     """
     Convert LAS data to clean DataFrame with proper null handling.
@@ -85,11 +130,14 @@ def process_data(las, mapping, smooth_window=0):
     # Standardize depth column name
     if mapping['DEPTH'] and mapping['DEPTH'] in df.columns:
         df.rename(columns={mapping['DEPTH']: 'DEPTH'}, inplace=True)
-    elif df.columns[0].upper() in ['DEPT', 'DEPTH']:
+    elif df.columns[0].upper() in ['DEPT', 'DEPTH', 'MD']:
         df.rename(columns={df.columns[0]: 'DEPTH'}, inplace=True)
     
     # Handle null values
     df = handle_null_values(df)
+    
+    # Normalize neutron porosity units (% or PU to v/v)
+    df = normalize_porosity_units(df, las, mapping)
     
     # Apply smoothing if requested
     if smooth_window > 0:

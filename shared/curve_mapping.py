@@ -11,8 +11,10 @@ Use get_curve_mapping_advanced() for full layered identification
 """
 
 # Standard curve mnemonics for automatic detection (simple mode)
+# NOTE: Order matters for DEPTH - MD is prioritized over TVD/TVDSS
 CURVE_MNEMONICS = {
-    'DEPTH': ['DEPT', 'DEPTH', 'DPTH', 'MD', 'TVD', 'TVDSS', 'AHD'],
+    'DEPTH': ['MD', 'DEPT', 'DEPTH', 'DPTH', 'TVD', 'TVDSS', 'AHD'],
+
     'GR': ['GR', 'GRC', 'GR_EDTC', 'SGR', 'CGR', 'HCGR', 'ECGR', 'GRD', 'GRS', 'GRAM', 'NGR'],
     'RES_DEEP': ['RT', 'RDEP', 'RLLD', 'RLL3', 'ILD', 'RILD', 'LLD', 'RD', 'RDLA', 'RLA5', 
                  'AT90', 'AHT90', 'R40', 'R36', 'HDRS', 'ATRT', 'RTRUE'],

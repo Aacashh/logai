@@ -26,6 +26,16 @@ from shared.curve_mapping import get_curve_mapping, get_curve_mapping_advanced, 
 from shared.data_processing import process_data, export_to_las
 from shared.splicing import group_files_by_well, WellGroupResult
 
+# Import ASCII parser for universal file support
+try:
+    from shared.ascii_parser import (
+        load_ascii_file, AsciiFileMetadata, DepthDetectionResult,
+        create_pseudo_las_from_ascii, validate_ascii_data
+    )
+    ASCII_PARSER_AVAILABLE = True
+except ImportError:
+    ASCII_PARSER_AVAILABLE = False
+
 # Import the 12-layer curve identification system
 try:
     from shared.curve_identifier import (
@@ -419,8 +429,8 @@ with st.sidebar:
     # Data source mode selection
     upload_mode = st.radio(
         "Data Source",
-        ["Upload Folder", "Upload Single File", "Upload Multiple (Splicing)"],
-        help="Upload folder to browse by Field/Well, single file for analysis, or multiple for splicing"
+        ["Upload Folder", "Upload Single File", "Upload ASCII/CSV", "Upload Multiple (Splicing)"],
+        help="Upload folder to browse by Field/Well, single file for analysis, ASCII/CSV import, or multiple for splicing"
     )
     
     # Initialize variables
@@ -429,6 +439,8 @@ with st.sidebar:
     multi_files = None
     selected_las_file = None
     folder_scan_result = None
+    ascii_file = None  # For ASCII/CSV files
+    ascii_import_settings = {}  # User-configurable ASCII import settings
     
     if upload_mode == "Upload Folder":
         st.markdown("#### 📂 Upload Folder Contents")
@@ -486,6 +498,40 @@ with st.sidebar:
             key='petro_primary',
             help="Upload a well log file for analysis (LAS or DLIS format)"
         )
+    
+    elif upload_mode == "Upload ASCII/CSV":
+        st.markdown("#### 📄 ASCII/CSV File Upload")
+        st.caption("Import generic ASCII, CSV, TXT, or delimited well log data")
+        
+        ascii_file = st.file_uploader(
+            "Upload ASCII/CSV File",
+            type=['csv', 'CSV', 'txt', 'TXT', 'asc', 'ASC', 'dat', 'DAT', 'tsv', 'TSV'],
+            key='petro_ascii',
+            help="Upload a delimited text file with well log data"
+        )
+        
+        if ascii_file:
+            st.markdown("##### ⚙️ Import Settings")
+            
+            # Allow user to override auto-detection
+            with st.expander("Advanced Import Options", expanded=False):
+                ascii_import_settings['delimiter'] = st.selectbox(
+                    "Delimiter",
+                    ["Auto-detect", "Comma (,)", "Tab", "Space", "Semicolon (;)", "Whitespace (multiple)"],
+                    help="How columns are separated in the file"
+                )
+                
+                ascii_import_settings['header_row'] = st.number_input(
+                    "Header Row",
+                    min_value=-1, max_value=50, value=-1,
+                    help="Row containing column names (-1 for auto-detect)"
+                )
+                
+                ascii_import_settings['skip_rows'] = st.number_input(
+                    "Skip Rows",
+                    min_value=0, max_value=100, value=0,
+                    help="Number of rows to skip before data starts"
+                )
     
     else:
         # Multiple files for splicing mode
@@ -678,6 +724,316 @@ def display_file_info(header, df, unit, col):
 
 
 # =============================================================================
+# MAIN CONTENT - ASCII/CSV FILE MODE (Universal Data Import)
+# =============================================================================
+
+if upload_mode == "Upload ASCII/CSV" and ascii_file and ASCII_PARSER_AVAILABLE:
+    st.markdown("""
+    <div class="feature-header">📥 Universal Data Import</div>
+    """, unsafe_allow_html=True)
+    
+    try:
+        # Parse delimiter setting
+        delimiter_map = {
+            "Auto-detect": None,
+            "Comma (,)": ",",
+            "Tab": "\t",
+            "Space": " ",
+            "Semicolon (;)": ";",
+            "Whitespace (multiple)": "whitespace"
+        }
+        delimiter_setting = delimiter_map.get(ascii_import_settings.get('delimiter', 'Auto-detect'))
+        header_row_setting = ascii_import_settings.get('header_row', -1)
+        if header_row_setting == -1:
+            header_row_setting = None
+        skip_rows_setting = ascii_import_settings.get('skip_rows', 0)
+        if skip_rows_setting == 0:
+            skip_rows_setting = None
+        
+        # Reset file position and load ASCII file
+        ascii_file.seek(0)
+        ascii_df, ascii_metadata, depth_result = load_ascii_file(
+            ascii_file,
+            delimiter=delimiter_setting,
+            header_row=header_row_setting,
+            skip_rows=skip_rows_setting
+        )
+        
+        # Store in session state for downstream processing
+        st.session_state['ascii_df'] = ascii_df
+        st.session_state['ascii_metadata'] = ascii_metadata
+        st.session_state['ascii_depth_result'] = depth_result
+        
+        # Display format detection results
+        col1, col2, col3 = st.columns(3)
+        
+        with col1:
+            st.markdown(f"""
+            <div class="metric-card">
+                <div class="metric-value">{ascii_metadata.num_data_rows:,}</div>
+                <div class="metric-label">Data Rows</div>
+            </div>
+            """, unsafe_allow_html=True)
+        
+        with col2:
+            st.markdown(f"""
+            <div class="metric-card">
+                <div class="metric-value">{ascii_metadata.num_data_columns}</div>
+                <div class="metric-label">Columns Detected</div>
+            </div>
+            """, unsafe_allow_html=True)
+        
+        with col3:
+            confidence_color = '#22c55e' if ascii_metadata.confidence_score >= 0.7 else '#f59e0b' if ascii_metadata.confidence_score >= 0.5 else '#ef4444'
+            st.markdown(f"""
+            <div class="metric-card">
+                <div class="metric-value" style="color: {confidence_color};">{ascii_metadata.confidence_score:.0%}</div>
+                <div class="metric-label">Detection Confidence</div>
+            </div>
+            """, unsafe_allow_html=True)
+        
+        # Format detection details
+        with st.expander("📋 Format Detection Details", expanded=True):
+            detail_col1, detail_col2 = st.columns(2)
+            
+            with detail_col1:
+                st.markdown(f"""
+                **Detected Settings:**
+                - **Delimiter:** `{ascii_metadata.detected_delimiter}` ({ascii_metadata.delimiter_type.name})
+                - **Encoding:** {ascii_metadata.encoding}
+                - **Header Row:** {ascii_metadata.header_row_index if ascii_metadata.header_row_index >= 0 else 'Auto-generated'}
+                - **Comment Char:** `{ascii_metadata.comment_char or 'None'}`
+                """)
+            
+            with detail_col2:
+                st.markdown(f"""
+                **Data Overview:**
+                - **Total Rows:** {ascii_metadata.num_data_rows:,}
+                - **Columns:** {ascii_metadata.num_data_columns}
+                - **Null Values:** {', '.join(map(str, ascii_metadata.null_values[:3]))}...
+                """)
+            
+            if ascii_metadata.detection_notes:
+                st.markdown("**Detection Notes:**")
+                for note in ascii_metadata.detection_notes:
+                    st.caption(f"• {note}")
+        
+        # Depth column detection and selection
+        st.markdown("### 📏 Depth Column Configuration")
+        
+        depth_col1, depth_col2 = st.columns([2, 1])
+        
+        with depth_col1:
+            # Allow manual override of depth column
+            all_columns = ascii_df.columns.tolist()
+            
+            # Determine default selection index
+            default_idx = 0
+            if depth_result.column_name and depth_result.column_name in all_columns:
+                default_idx = all_columns.index(depth_result.column_name)
+            
+            selected_depth_col = st.selectbox(
+                "Select Depth Column",
+                options=all_columns,
+                index=default_idx,
+                help="Choose the column containing depth values"
+            )
+            
+            # Show detection method badge
+            if depth_result.column_name == selected_depth_col:
+                method_colors = {
+                    'keyword': '#22c55e',
+                    'monotonic': '#38bdf8',
+                    'unit': '#f59e0b',
+                    'manual': '#94a3b8',
+                    'fallback': '#ef4444'
+                }
+                method_color = method_colors.get(depth_result.detection_method, '#64748b')
+                st.markdown(f"""
+                <span class="status-badge" style="background: {method_color};">
+                    Detected via: {depth_result.detection_method.upper()}
+                </span>
+                <span style="margin-left: 1rem; color: #94a3b8;">
+                    Confidence: {depth_result.confidence:.0%}
+                </span>
+                """, unsafe_allow_html=True)
+        
+        with depth_col2:
+            if depth_result.depth_range[0] != depth_result.depth_range[1]:
+                st.metric("Depth Range", f"{depth_result.depth_range[0]:.1f} - {depth_result.depth_range[1]:.1f}")
+                st.caption(f"Unit: {depth_result.detected_unit} | {'↑ Increasing' if depth_result.is_increasing else '↓ Decreasing'}")
+        
+        # Data preview
+        st.markdown("### 👁️ Data Preview (First 15 Rows)")
+        
+        preview_df = ascii_df.head(15).copy()
+        # Highlight depth column
+        st.dataframe(
+            preview_df.style.set_properties(**{'background-color': '#1e3a5f'}, subset=[selected_depth_col]),
+            use_container_width=True,
+            hide_index=True
+        )
+        
+        # Data validation report
+        validation = validate_ascii_data(ascii_df, depth_result)
+        
+        if validation['issues']:
+            st.error("⚠️ **Data Issues Found:**")
+            for issue in validation['issues']:
+                st.markdown(f"- ❌ {issue}")
+        
+        if validation['warnings']:
+            with st.expander("⚠️ Warnings", expanded=False):
+                for warning in validation['warnings']:
+                    st.warning(warning)
+        
+        # Column statistics
+        with st.expander("📊 Column Statistics", expanded=False):
+            stats_data = []
+            for col, stats in validation['column_stats'].items():
+                row = {
+                    'Column': col,
+                    'Type': 'Numeric' if stats['is_numeric'] else 'Text',
+                    'Null %': f"{stats['null_percentage']:.1f}%",
+                }
+                if stats['is_numeric'] and 'min' in stats:
+                    row['Min'] = f"{stats['min']:.3f}"
+                    row['Max'] = f"{stats['max']:.3f}"
+                    row['Mean'] = f"{stats['mean']:.3f}"
+                else:
+                    row['Min'] = '-'
+                    row['Max'] = '-'
+                    row['Mean'] = '-'
+                stats_data.append(row)
+            
+            st.dataframe(pd.DataFrame(stats_data), use_container_width=True, hide_index=True)
+        
+        # Apply curve identification using the 12-layer methodology pattern
+        st.markdown("### 🎯 Curve Identification")
+        
+        # Use the lightweight mnemonic-based identification
+        ascii_mapping = _identify_curves_from_mnemonics(ascii_df.columns.tolist(), ascii_df)
+        
+        # Add DEPTH to mapping
+        ascii_mapping['DEPTH'] = selected_depth_col
+        
+        if ascii_mapping:
+            mapping_cols = st.columns(4)
+            col_idx = 0
+            for curve_type, mnemonic in ascii_mapping.items():
+                with mapping_cols[col_idx % 4]:
+                    st.markdown(f"""
+                    <div style="background: #334155; padding: 0.5rem; border-radius: 6px; margin: 0.25rem 0; text-align: center;">
+                        <span style="color: #94a3b8; font-size: 0.75rem;">{curve_type}</span><br>
+                        <span style="font-weight: 700; color: #e2e8f0; font-family: 'JetBrains Mono', monospace;">{mnemonic}</span>
+                    </div>
+                    """, unsafe_allow_html=True)
+                col_idx += 1
+        else:
+            st.info("No standard petrophysical curves identified. Columns will be treated as generic data.")
+        
+        st.markdown("---")
+        
+        # Convert to LAS-compatible format for downstream processing
+        st.markdown("### 🔄 Convert for Analysis")
+        
+        if st.button("✅ Import Data for Analysis", type="primary", key="import_ascii"):
+            try:
+                # Rename depth column to standard 'DEPTH'
+                processed_df = ascii_df.copy()
+                if selected_depth_col != 'DEPTH':
+                    processed_df = processed_df.rename(columns={selected_depth_col: 'DEPTH'})
+                
+                # Update mapping
+                if 'DEPTH' not in ascii_mapping or ascii_mapping['DEPTH'] != 'DEPTH':
+                    ascii_mapping['DEPTH'] = 'DEPTH'
+                
+                # Store in session state
+                st.session_state['imported_ascii_df'] = processed_df
+                st.session_state['imported_ascii_mapping'] = ascii_mapping
+                st.session_state['ascii_import_complete'] = True
+                
+                st.success(f"✅ Successfully imported {len(processed_df):,} rows with {len(processed_df.columns)} columns!")
+                st.info("📌 Data is now available for analysis in the tabs below.")
+                st.rerun()
+            except Exception as e:
+                st.error(f"Error during import: {str(e)}")
+        
+        # Show analysis tabs if data was previously imported
+        if st.session_state.get('ascii_import_complete') and 'imported_ascii_df' in st.session_state:
+            st.markdown("---")
+            st.markdown('<div class="feature-header">📊 Analysis Tools</div>', unsafe_allow_html=True)
+            
+            # Use imported data
+            df = st.session_state['imported_ascii_df']
+            mapping = st.session_state['imported_ascii_mapping']
+            unit = depth_result.detected_unit
+            header = {'WELL': ascii_file.name.split('.')[0], 'FIELD': 'ASCII Import'}
+            
+            # Get available features
+            feature_columns = get_available_feature_columns(df, mapping)
+            if not feature_columns:
+                # If no standard curves, use all numeric columns except DEPTH
+                feature_columns = [c for c in df.columns if c != 'DEPTH' and pd.api.types.is_numeric_dtype(df[c])]
+            
+            # Display tabs for ASCII imported data
+            tab1, tab2 = st.tabs([
+                "🔍 Outlier Detection",
+                "📊 Data Summary"
+            ])
+            
+            with tab1:
+                st.markdown("""
+                <div class="feature-card">
+                    <div class="feature-title">🔍 Outlier Detection for Imported Data</div>
+                    <div class="feature-desc">
+                        Analyze the imported ASCII data for outliers and anomalies.
+                    </div>
+                </div>
+                """, unsafe_allow_html=True)
+                
+                if feature_columns:
+                    from ml_components.outlier_detection import detect_outliers_isolation_forest
+                    
+                    selected_curves = st.multiselect(
+                        "Select Curves to Analyze",
+                        options=feature_columns,
+                        default=feature_columns[:min(3, len(feature_columns))]
+                    )
+                    
+                    contamination = st.slider("Contamination %", 1, 20, 5, key="ascii_contam") / 100
+                    
+                    if selected_curves and st.button("Run Outlier Detection", key="ascii_outlier"):
+                        with st.spinner("Detecting outliers..."):
+                            result = detect_outliers_isolation_forest(df, selected_curves, contamination)
+                            st.metric("Outliers Detected", result.num_anomalies)
+                            st.metric("Contamination", f"{result.contamination_actual*100:.1f}%")
+                else:
+                    st.warning("No numeric columns available for analysis.")
+            
+            with tab2:
+                st.markdown("### 📊 Data Summary Statistics")
+                
+                numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
+                if 'DEPTH' in numeric_cols:
+                    numeric_cols.remove('DEPTH')
+                
+                if numeric_cols:
+                    summary_df = df[numeric_cols].describe().T
+                    summary_df['null_count'] = df[numeric_cols].isna().sum()
+                    summary_df['null_%'] = (df[numeric_cols].isna().sum() / len(df) * 100).round(2)
+                    st.dataframe(summary_df, use_container_width=True)
+                else:
+                    st.info("No numeric columns to summarize.")
+    
+    except Exception as e:
+        st.error(f"Error processing ASCII file: {str(e)}")
+        import traceback
+        with st.expander("Error Details"):
+            st.code(traceback.format_exc())
+
+
+# =============================================================================
 # MAIN CONTENT - SINGLE FILE MODE (from folder selection or file upload)
 # =============================================================================
 
@@ -764,8 +1120,9 @@ if has_single_file:
                 </div>
                 """, unsafe_allow_html=True)
                 
-                # Show the 12-layer methodology
-                with st.expander("📋 12-Layer Methodology Explained", expanded=False):
+                # Show the 12-layer methodology (using checkbox instead of nested expander)
+                show_methodology = st.checkbox("📋 Show 12-Layer Methodology Details", value=False, key="show_methodology")
+                if show_methodology:
                     st.markdown("""
                     <div class="layer-methodology">
                         <div class="layer-item">
@@ -987,11 +1344,12 @@ if has_single_file:
             plt.close(preview_fig)
         
         # Main tabs
-        tab1, tab2, tab3, tab4 = st.tabs([
+        tab1, tab2, tab3, tab4, tab5 = st.tabs([
             "🔍 Outlier Detection",
             "🔧 Noise Removal",
             "🔗 Log Splicing",
-            "📐 Depth Alignment"
+            "📐 Depth Alignment",
+            "🪨 Rock Classification"
         ])
         
         # =================================================================
@@ -1774,6 +2132,362 @@ if has_single_file:
                         plt.close(fig)
                     else:
                         st.warning("Insufficient valid data points for correlation analysis.")
+        
+        # =================================================================
+        # TAB 5: ROCK CLASSIFICATION (Unsupervised Learning)
+        # =================================================================
+        with tab5:
+            st.markdown("""
+            <div class="feature-card">
+                <div class="feature-title">🪨 Rock Type Classification (Unsupervised Learning)</div>
+                <div class="feature-desc">
+                    Identify rock types (Sand/Shale, Reservoir/Non-Reservoir) using clustering algorithms.
+                    Uses K-means and Gaussian Mixture Models with automatic optimal cluster detection.
+                    <br><br>
+                    <strong>Features:</strong> GR, RHOB, NPHI, DT (if available)
+                </div>
+            </div>
+            """, unsafe_allow_html=True)
+            
+            try:
+                from ml_components.rock_classification import (
+                    classify_rocks_kmeans,
+                    classify_rocks_gmm,
+                    find_optimal_clusters,
+                    get_facies_colors,
+                    get_facies_color_by_interpretation
+                )
+                from plotting import (
+                    create_facies_log_display,
+                    create_cluster_crossplot,
+                    create_3d_cluster_scatter,
+                    create_cluster_quality_plot
+                )
+                
+                ROCK_CLASSIFICATION_AVAILABLE = True
+            except ImportError as e:
+                ROCK_CLASSIFICATION_AVAILABLE = False
+                st.error(f"Rock classification module not available: {e}")
+            
+            if ROCK_CLASSIFICATION_AVAILABLE:
+                # Feature selection for single file
+                st.markdown("### 🔧 Classification Settings")
+                
+                settings_col1, settings_col2 = st.columns(2)
+                
+                with settings_col1:
+                    # Auto-detect available curves for clustering
+                    key_curves = []
+                    for curve_type in ['GR', 'RHOB', 'NPHI', 'DT', 'SONIC', 'DTC', 'PE', 'RT', 'RLLD']:
+                        if curve_type in df.columns:
+                            key_curves.append(curve_type)
+                    
+                    # Also check from mapping
+                    gr_col = mapping.get('GR')
+                    if gr_col and gr_col in df.columns and gr_col not in key_curves:
+                        key_curves.insert(0, gr_col)
+                    
+                    dens_col = mapping.get('DENS')
+                    if dens_col and dens_col in df.columns and dens_col not in key_curves:
+                        key_curves.append(dens_col)
+                    
+                    neut_col = mapping.get('NEUT')
+                    if neut_col and neut_col in df.columns and neut_col not in key_curves:
+                        key_curves.append(neut_col)
+                    
+                    # Fallback to all numeric columns
+                    if len(key_curves) < 2:
+                        key_curves = [col for col in df.columns 
+                                     if col != 'DEPTH' and df[col].dtype in ['float64', 'float32', 'int64', 'int32']]
+                    
+                    selected_features = st.multiselect(
+                        "Feature Curves for Clustering",
+                        options=key_curves,
+                        default=key_curves[:min(4, len(key_curves))],
+                        help="Select at least 2 curves for clustering. GR, RHOB, NPHI recommended.",
+                        key="sf_rock_features"
+                    )
+                
+                with settings_col2:
+                    algorithm = st.selectbox(
+                        "Clustering Algorithm",
+                        ["K-Means (Fast, Interpretable)", "GMM (Soft Clustering, Flexible Shapes)"],
+                        help="K-Means for quick results, GMM for probability-based classification",
+                        key="sf_rock_algo"
+                    )
+                    
+                    n_clusters_mode = st.selectbox(
+                        "Number of Clusters",
+                        ["Auto-detect (Recommended)", "Manual Selection"],
+                        help="Auto-detect uses Silhouette analysis to find optimal K",
+                        key="sf_rock_k_mode"
+                    )
+                
+                # Advanced options
+                with st.expander("⚙️ Advanced Settings", expanded=False):
+                    adv_col1, adv_col2 = st.columns(2)
+                    
+                    with adv_col1:
+                        use_pca = st.checkbox("Apply PCA Preprocessing", value=True,
+                                            help="Reduces noise and collinearity in features",
+                                            key="sf_rock_pca")
+                        
+                        if use_pca:
+                            pca_variance = st.slider("PCA Variance to Retain", 
+                                                    min_value=0.80, max_value=0.99, value=0.95,
+                                                    help="Higher values keep more information",
+                                                    key="sf_rock_pca_var")
+                        else:
+                            pca_variance = 0.95
+                    
+                    with adv_col2:
+                        if n_clusters_mode == "Manual Selection":
+                            manual_k = st.slider("Number of Clusters (K)", 
+                                               min_value=2, max_value=8, value=2,
+                                               help="2 = Sand/Shale, 3+ for more detailed facies",
+                                               key="sf_rock_k")
+                        else:
+                            manual_k = None
+                        
+                        if "GMM" in algorithm:
+                            covariance_type = st.selectbox(
+                                "GMM Covariance Type",
+                                ["full", "tied", "diag", "spherical"],
+                                help="'full' is most flexible, 'spherical' is simplest",
+                                key="sf_rock_cov"
+                            )
+                        else:
+                            covariance_type = "full"
+                
+                # Run clustering
+                if len(selected_features) >= 2:
+                    if st.button("🚀 Run Rock Classification", type="primary", key="sf_run_rock_class"):
+                        with st.spinner("Analyzing rock types..."):
+                            try:
+                                # Run classification
+                                if "K-Means" in algorithm:
+                                    result = classify_rocks_kmeans(
+                                        df,
+                                        selected_features,
+                                        n_clusters=manual_k,
+                                        use_pca=use_pca,
+                                        pca_variance=pca_variance,
+                                        auto_interpret=True
+                                    )
+                                else:
+                                    result = classify_rocks_gmm(
+                                        df,
+                                        selected_features,
+                                        n_components=manual_k,
+                                        use_pca=use_pca,
+                                        pca_variance=pca_variance,
+                                        auto_interpret=True,
+                                        covariance_type=covariance_type
+                                    )
+                                
+                                # Store in session state
+                                st.session_state['sf_rock_classification_result'] = result
+                                st.session_state['sf_rock_classification_df'] = df
+                                st.session_state['sf_rock_classification_mapping'] = mapping
+                                st.session_state['sf_rock_classification_header'] = header
+                                
+                                st.success(f"✅ Classification complete! Found {result.num_clusters} rock types.")
+                                
+                            except Exception as e:
+                                st.error(f"Classification error: {str(e)}")
+                                import traceback
+                                st.code(traceback.format_exc())
+                else:
+                    st.warning("⚠️ Please select at least 2 feature curves for clustering.")
+                
+                # Display results if available
+                if 'sf_rock_classification_result' in st.session_state:
+                    result = st.session_state['sf_rock_classification_result']
+                    rock_df = st.session_state['sf_rock_classification_df']
+                    rock_mapping = st.session_state['sf_rock_classification_mapping']
+                    rock_header = st.session_state['sf_rock_classification_header']
+                    
+                    st.markdown("---")
+                    st.markdown('<div class="feature-header">📊 Classification Results</div>', 
+                               unsafe_allow_html=True)
+                    
+                    # Metrics row
+                    m1, m2, m3, m4 = st.columns(4)
+                    
+                    with m1:
+                        st.markdown(f"""
+                        <div class="metric-card">
+                            <div class="metric-value">{result.num_clusters}</div>
+                            <div class="metric-label">Rock Types</div>
+                        </div>
+                        """, unsafe_allow_html=True)
+                    
+                    with m2:
+                        sil_color = '#22c55e' if result.silhouette_score > 0.5 else '#f59e0b' if result.silhouette_score > 0.25 else '#ef4444'
+                        st.markdown(f"""
+                        <div class="metric-card">
+                            <div class="metric-value" style="color: {sil_color};">{result.silhouette_score:.3f}</div>
+                            <div class="metric-label">Silhouette Score</div>
+                        </div>
+                        """, unsafe_allow_html=True)
+                    
+                    with m3:
+                        st.markdown(f"""
+                        <div class="metric-card">
+                            <div class="metric-value">{result.method.upper()}</div>
+                            <div class="metric-label">Algorithm</div>
+                        </div>
+                        """, unsafe_allow_html=True)
+                    
+                    with m4:
+                        pca_label = f"{sum(result.pca_explained_variance)*100:.0f}%" if result.used_pca and result.pca_explained_variance is not None else "None"
+                        st.markdown(f"""
+                        <div class="metric-card">
+                            <div class="metric-value">{pca_label}</div>
+                            <div class="metric-label">PCA Variance</div>
+                        </div>
+                        """, unsafe_allow_html=True)
+                    
+                    # Cluster interpretations
+                    st.markdown("### 🏷️ Rock Type Interpretations")
+                    
+                    facies_colors = get_facies_colors(result.num_clusters)
+                    
+                    interp_cols = st.columns(min(result.num_clusters, 4))
+                    for i, (cluster_id, interpretation) in enumerate(result.cluster_interpretations.items()):
+                        col_idx = i % len(interp_cols)
+                        with interp_cols[col_idx]:
+                            color = facies_colors[cluster_id] if cluster_id < len(facies_colors) else '#808080'
+                            stats = result.cluster_stats.get(cluster_id, {})
+                            pct = stats.get('percentage', 0)
+                            count = stats.get('count', 0)
+                            
+                            st.markdown(f"""
+                            <div style="background: {color}; padding: 15px; border-radius: 10px; text-align: center; margin: 5px 0;">
+                                <div style="font-size: 1.1rem; font-weight: bold; color: #1e293b;">{interpretation}</div>
+                                <div style="font-size: 0.9rem; color: #334155;">{pct:.1f}% ({count:,} samples)</div>
+                            </div>
+                            """, unsafe_allow_html=True)
+                    
+                    # K analysis if available
+                    if result.k_analysis:
+                        with st.expander("📈 Cluster Quality Analysis (Elbow + Silhouette)", expanded=False):
+                            k_fig = create_cluster_quality_plot(result.k_analysis, result.num_clusters)
+                            st.pyplot(k_fig)
+                            plt.close(k_fig)
+                    
+                    # Visualization tabs
+                    st.markdown("### 📊 Visualizations")
+                    
+                    viz_tab1, viz_tab2, viz_tab3 = st.tabs([
+                        "📋 Facies Log Display",
+                        "📈 Crossplots",
+                        "🌐 3D Scatter Plot"
+                    ])
+                    
+                    with viz_tab1:
+                        st.markdown("**Professional log display with rock type (facies) track:**")
+                        
+                        # Create facies log display
+                        facies_fig = create_facies_log_display(
+                            rock_df,
+                            result.cluster_labels,
+                            cluster_interpretations=result.cluster_interpretations,
+                            mapping=rock_mapping,
+                            header_info=rock_header if isinstance(rock_header, dict) else None,
+                            settings={'scale_ratio': 400, 'depth_unit': 'm'},
+                            facies_colors=facies_colors
+                        )
+                        st.pyplot(facies_fig)
+                        plt.close(facies_fig)
+                        
+                        st.caption("""
+                        **Legend:** The FACIES track shows color-coded rock types identified by clustering.
+                        Gold/Yellow = Sand (Reservoir) | Gray = Shale (Non-Reservoir)
+                        """)
+                    
+                    with viz_tab2:
+                        st.markdown("**Crossplots showing cluster separation:**")
+                        
+                        xp_col1, xp_col2 = st.columns(2)
+                        
+                        available_cols = [col for col in result.feature_columns if col in rock_df.columns]
+                        
+                        with xp_col1:
+                            x_curve = st.selectbox("X-Axis Curve", options=available_cols,
+                                                  index=0 if available_cols else 0,
+                                                  key="sf_xplot_x")
+                        
+                        with xp_col2:
+                            y_default = 1 if len(available_cols) > 1 else 0
+                            y_curve = st.selectbox("Y-Axis Curve", options=available_cols,
+                                                  index=y_default,
+                                                  key="sf_xplot_y")
+                        
+                        if x_curve and y_curve:
+                            crossplot_fig = create_cluster_crossplot(
+                                rock_df,
+                                x_curve,
+                                y_curve,
+                                result.cluster_labels,
+                                cluster_interpretations=result.cluster_interpretations,
+                                facies_colors=facies_colors,
+                                title=f"Rock Type Classification: {x_curve} vs {y_curve}"
+                            )
+                            st.pyplot(crossplot_fig)
+                            plt.close(crossplot_fig)
+                            
+                            st.caption("⭐ Stars mark cluster centroids")
+                    
+                    with viz_tab3:
+                        if len(result.feature_columns) >= 3:
+                            st.markdown("**Interactive 3D visualization of rock types:**")
+                            
+                            available_3d = [col for col in result.feature_columns if col in rock_df.columns]
+                            
+                            if len(available_3d) >= 3:
+                                scatter_3d_fig = create_3d_cluster_scatter(
+                                    rock_df,
+                                    available_3d[:3],
+                                    result.cluster_labels,
+                                    cluster_interpretations=result.cluster_interpretations,
+                                    facies_colors=facies_colors,
+                                    title="3D Rock Type Classification"
+                                )
+                                
+                                if scatter_3d_fig:
+                                    st.plotly_chart(scatter_3d_fig, use_container_width=True)
+                                    st.caption("🖱️ Drag to rotate, scroll to zoom, hover for details")
+                                else:
+                                    st.warning("Plotly not available for 3D visualization")
+                            else:
+                                st.info("Need at least 3 feature curves for 3D visualization")
+                        else:
+                            st.info("Need at least 3 feature curves for 3D visualization. Current: " + 
+                                   ", ".join(result.feature_columns))
+                    
+                    # Export functionality
+                    st.markdown("### 📤 Export Results")
+                    
+                    export_df = rock_df[['DEPTH'] + [c for c in result.feature_columns if c in rock_df.columns]].copy()
+                    export_df['FACIES_CLUSTER'] = result.cluster_labels
+                    export_df['FACIES_NAME'] = [
+                        result.cluster_interpretations.get(label, f"Facies {label+1}") if label >= 0 else "Unknown"
+                        for label in result.cluster_labels
+                    ]
+                    
+                    if result.cluster_probabilities is not None:
+                        for i in range(result.num_clusters):
+                            export_df[f'PROB_CLUSTER_{i}'] = result.cluster_probabilities[:, i]
+                    
+                    csv = export_df.to_csv(index=False)
+                    st.download_button(
+                        "📥 Download Classification Results (CSV)",
+                        csv,
+                        "rock_classification_results.csv",
+                        "text/csv",
+                        key="sf_download_rock_csv"
+                    )
     
     except Exception as e:
         st.error(f"Error loading file: {str(e)}")
@@ -2040,11 +2754,12 @@ elif upload_mode == "Upload Multiple (Splicing)" and multi_files and len(multi_f
                 plt.close(ref_fig)
         
         # Main tabs for multi-file operations
-        tab1, tab2, tab3, tab4 = st.tabs([
+        tab1, tab2, tab3, tab4, tab5 = st.tabs([
             "🔍 Outlier Detection",
             "🔧 Noise Removal",
             "🔗 Log Splicing",
-            "📐 Depth Alignment"
+            "📐 Depth Alignment",
+            "🪨 Rock Classification"
         ])
         
         # =================================================================
@@ -2864,6 +3579,381 @@ elif upload_mode == "Upload Multiple (Splicing)" and multi_files and len(multi_f
                     result = detect_tool_startup_noise(noise_df, noise_curves, 'DEPTH')
                     st.metric("Noise Samples", result.noise_samples)
                     st.metric("Affected %", f"{result.noise_percentage:.1f}%")
+        
+        # =================================================================
+        # TAB 5: ROCK CLASSIFICATION (Unsupervised Learning)
+        # =================================================================
+        with tab5:
+            st.markdown("""
+            <div class="feature-card">
+                <div class="feature-title">🪨 Rock Type Classification (Unsupervised Learning)</div>
+                <div class="feature-desc">
+                    Identify rock types (Sand/Shale, Reservoir/Non-Reservoir) using clustering algorithms.
+                    Uses K-means and Gaussian Mixture Models with automatic optimal cluster detection.
+                    <br><br>
+                    <strong>Features:</strong> GR, RHOB, NPHI, DT (if available)
+                </div>
+            </div>
+            """, unsafe_allow_html=True)
+            
+            try:
+                from ml_components.rock_classification import (
+                    classify_rocks_kmeans,
+                    classify_rocks_gmm,
+                    find_optimal_clusters,
+                    get_facies_colors,
+                    get_facies_color_by_interpretation
+                )
+                from plotting import (
+                    create_facies_log_display,
+                    create_cluster_crossplot,
+                    create_3d_cluster_scatter,
+                    create_cluster_quality_plot
+                )
+                
+                ROCK_CLASSIFICATION_AVAILABLE = True
+            except ImportError as e:
+                ROCK_CLASSIFICATION_AVAILABLE = False
+                st.error(f"Rock classification module not available: {e}")
+            
+            if ROCK_CLASSIFICATION_AVAILABLE:
+                # File selection
+                st.markdown("### 📁 Select File for Classification")
+                
+                rock_file_names = []
+                for i, (header, df) in enumerate(zip(headers, dataframes)):
+                    well_name = header.get('WELL', 'Unknown') if isinstance(header, dict) else 'Unknown'
+                    rock_file_names.append(f"{well_name} ({len(df)} samples)")
+                
+                rock_file_idx = st.selectbox(
+                    "Select File",
+                    options=list(range(len(dataframes))),
+                    format_func=lambda i: rock_file_names[i] if i < len(rock_file_names) else f"File {i+1}",
+                    key="rock_file_select"
+                )
+                
+                rock_df = dataframes[rock_file_idx]
+                rock_mapping = mappings[rock_file_idx]
+                rock_header = headers[rock_file_idx] if rock_file_idx < len(headers) else {}
+                
+                # Feature selection
+                st.markdown("### 🔧 Classification Settings")
+                
+                settings_col1, settings_col2 = st.columns(2)
+                
+                with settings_col1:
+                    # Auto-detect available curves for clustering
+                    key_curves = []
+                    for curve_type in ['GR', 'RHOB', 'NPHI', 'DT', 'SONIC', 'DTC', 'PE', 'RT', 'RLLD']:
+                        if curve_type in rock_df.columns:
+                            key_curves.append(curve_type)
+                    
+                    # Also check common column names from mapping
+                    gr_col = rock_mapping.get('GR')
+                    if gr_col and gr_col in rock_df.columns and gr_col not in key_curves:
+                        key_curves.insert(0, gr_col)
+                    
+                    dens_col = rock_mapping.get('DENS')
+                    if dens_col and dens_col in rock_df.columns and dens_col not in key_curves:
+                        key_curves.append(dens_col)
+                    
+                    neut_col = rock_mapping.get('NEUT')
+                    if neut_col and neut_col in rock_df.columns and neut_col not in key_curves:
+                        key_curves.append(neut_col)
+                    
+                    # Fallback to all numeric columns
+                    if len(key_curves) < 2:
+                        key_curves = [col for col in rock_df.columns 
+                                     if col != 'DEPTH' and rock_df[col].dtype in ['float64', 'float32', 'int64', 'int32']]
+                    
+                    selected_features = st.multiselect(
+                        "Feature Curves for Clustering",
+                        options=key_curves,
+                        default=key_curves[:min(4, len(key_curves))],
+                        help="Select at least 2 curves for clustering. GR, RHOB, NPHI recommended."
+                    )
+                
+                with settings_col2:
+                    algorithm = st.selectbox(
+                        "Clustering Algorithm",
+                        ["K-Means (Fast, Interpretable)", "GMM (Soft Clustering, Flexible Shapes)"],
+                        help="K-Means for quick results, GMM for probability-based classification"
+                    )
+                    
+                    n_clusters_mode = st.selectbox(
+                        "Number of Clusters",
+                        ["Auto-detect (Recommended)", "Manual Selection"],
+                        help="Auto-detect uses Silhouette analysis to find optimal K"
+                    )
+                
+                # Advanced options
+                with st.expander("⚙️ Advanced Settings", expanded=False):
+                    adv_col1, adv_col2 = st.columns(2)
+                    
+                    with adv_col1:
+                        use_pca = st.checkbox("Apply PCA Preprocessing", value=True,
+                                            help="Reduces noise and collinearity in features")
+                        
+                        if use_pca:
+                            pca_variance = st.slider("PCA Variance to Retain", 
+                                                    min_value=0.80, max_value=0.99, value=0.95,
+                                                    help="Higher values keep more information")
+                        else:
+                            pca_variance = 0.95
+                    
+                    with adv_col2:
+                        if n_clusters_mode == "Manual Selection":
+                            manual_k = st.slider("Number of Clusters (K)", 
+                                               min_value=2, max_value=8, value=2,
+                                               help="2 = Sand/Shale, 3+ for more detailed facies")
+                        else:
+                            manual_k = None
+                        
+                        if "GMM" in algorithm:
+                            covariance_type = st.selectbox(
+                                "GMM Covariance Type",
+                                ["full", "tied", "diag", "spherical"],
+                                help="'full' is most flexible, 'spherical' is simplest"
+                            )
+                        else:
+                            covariance_type = "full"
+                
+                # Run clustering
+                if len(selected_features) >= 2:
+                    if st.button("🚀 Run Rock Classification", type="primary", key="run_rock_class"):
+                        with st.spinner("Analyzing rock types..."):
+                            try:
+                                # Run classification
+                                if "K-Means" in algorithm:
+                                    result = classify_rocks_kmeans(
+                                        rock_df,
+                                        selected_features,
+                                        n_clusters=manual_k,
+                                        use_pca=use_pca,
+                                        pca_variance=pca_variance,
+                                        auto_interpret=True
+                                    )
+                                else:
+                                    result = classify_rocks_gmm(
+                                        rock_df,
+                                        selected_features,
+                                        n_components=manual_k,
+                                        use_pca=use_pca,
+                                        pca_variance=pca_variance,
+                                        auto_interpret=True,
+                                        covariance_type=covariance_type
+                                    )
+                                
+                                # Store in session state
+                                st.session_state['rock_classification_result'] = result
+                                st.session_state['rock_classification_df'] = rock_df
+                                st.session_state['rock_classification_mapping'] = rock_mapping
+                                st.session_state['rock_classification_header'] = rock_header
+                                
+                                st.success(f"✅ Classification complete! Found {result.num_clusters} rock types.")
+                                
+                            except Exception as e:
+                                st.error(f"Classification error: {str(e)}")
+                                import traceback
+                                st.code(traceback.format_exc())
+                else:
+                    st.warning("⚠️ Please select at least 2 feature curves for clustering.")
+                
+                # Display results if available
+                if 'rock_classification_result' in st.session_state:
+                    result = st.session_state['rock_classification_result']
+                    rock_df = st.session_state['rock_classification_df']
+                    rock_mapping = st.session_state['rock_classification_mapping']
+                    rock_header = st.session_state['rock_classification_header']
+                    
+                    st.markdown("---")
+                    st.markdown('<div class="feature-header">📊 Classification Results</div>', 
+                               unsafe_allow_html=True)
+                    
+                    # Metrics row
+                    m1, m2, m3, m4 = st.columns(4)
+                    
+                    with m1:
+                        st.markdown(f"""
+                        <div class="metric-card">
+                            <div class="metric-value">{result.num_clusters}</div>
+                            <div class="metric-label">Rock Types</div>
+                        </div>
+                        """, unsafe_allow_html=True)
+                    
+                    with m2:
+                        sil_color = '#22c55e' if result.silhouette_score > 0.5 else '#f59e0b' if result.silhouette_score > 0.25 else '#ef4444'
+                        st.markdown(f"""
+                        <div class="metric-card">
+                            <div class="metric-value" style="color: {sil_color};">{result.silhouette_score:.3f}</div>
+                            <div class="metric-label">Silhouette Score</div>
+                        </div>
+                        """, unsafe_allow_html=True)
+                    
+                    with m3:
+                        st.markdown(f"""
+                        <div class="metric-card">
+                            <div class="metric-value">{result.method.upper()}</div>
+                            <div class="metric-label">Algorithm</div>
+                        </div>
+                        """, unsafe_allow_html=True)
+                    
+                    with m4:
+                        pca_label = f"{sum(result.pca_explained_variance)*100:.0f}%" if result.used_pca and result.pca_explained_variance is not None else "None"
+                        st.markdown(f"""
+                        <div class="metric-card">
+                            <div class="metric-value">{pca_label}</div>
+                            <div class="metric-label">PCA Variance</div>
+                        </div>
+                        """, unsafe_allow_html=True)
+                    
+                    # Cluster interpretations
+                    st.markdown("### 🏷️ Rock Type Interpretations")
+                    
+                    facies_colors = get_facies_colors(result.num_clusters)
+                    
+                    interp_cols = st.columns(min(result.num_clusters, 4))
+                    for i, (cluster_id, interpretation) in enumerate(result.cluster_interpretations.items()):
+                        col_idx = i % len(interp_cols)
+                        with interp_cols[col_idx]:
+                            color = facies_colors[cluster_id] if cluster_id < len(facies_colors) else '#808080'
+                            stats = result.cluster_stats.get(cluster_id, {})
+                            pct = stats.get('percentage', 0)
+                            count = stats.get('count', 0)
+                            
+                            st.markdown(f"""
+                            <div style="background: {color}; padding: 15px; border-radius: 10px; text-align: center; margin: 5px 0;">
+                                <div style="font-size: 1.1rem; font-weight: bold; color: #1e293b;">{interpretation}</div>
+                                <div style="font-size: 0.9rem; color: #334155;">{pct:.1f}% ({count:,} samples)</div>
+                            </div>
+                            """, unsafe_allow_html=True)
+                    
+                    # K analysis if available
+                    if result.k_analysis:
+                        with st.expander("📈 Cluster Quality Analysis (Elbow + Silhouette)", expanded=False):
+                            k_fig = create_cluster_quality_plot(result.k_analysis, result.num_clusters)
+                            st.pyplot(k_fig)
+                            plt.close(k_fig)
+                    
+                    # Visualization tabs
+                    st.markdown("### 📊 Visualizations")
+                    
+                    viz_tab1, viz_tab2, viz_tab3 = st.tabs([
+                        "📋 Facies Log Display",
+                        "📈 Crossplots",
+                        "🌐 3D Scatter Plot"
+                    ])
+                    
+                    with viz_tab1:
+                        st.markdown("**Professional log display with rock type (facies) track:**")
+                        
+                        # Create facies log display
+                        facies_fig = create_facies_log_display(
+                            rock_df,
+                            result.cluster_labels,
+                            cluster_interpretations=result.cluster_interpretations,
+                            mapping=rock_mapping,
+                            header_info=rock_header if isinstance(rock_header, dict) else None,
+                            settings={'scale_ratio': 400, 'depth_unit': 'm'},
+                            facies_colors=facies_colors
+                        )
+                        st.pyplot(facies_fig)
+                        plt.close(facies_fig)
+                        
+                        # Legend explanation
+                        st.caption("""
+                        **Legend:** The FACIES track shows color-coded rock types identified by clustering.
+                        Gold/Yellow = Sand (Reservoir) | Gray = Shale (Non-Reservoir)
+                        """)
+                    
+                    with viz_tab2:
+                        st.markdown("**Crossplots showing cluster separation:**")
+                        
+                        # Select curves for crossplot
+                        xp_col1, xp_col2 = st.columns(2)
+                        
+                        available_cols = [col for col in result.feature_columns if col in rock_df.columns]
+                        
+                        with xp_col1:
+                            x_curve = st.selectbox("X-Axis Curve", options=available_cols,
+                                                  index=0 if available_cols else 0,
+                                                  key="xplot_x")
+                        
+                        with xp_col2:
+                            y_default = 1 if len(available_cols) > 1 else 0
+                            y_curve = st.selectbox("Y-Axis Curve", options=available_cols,
+                                                  index=y_default,
+                                                  key="xplot_y")
+                        
+                        if x_curve and y_curve:
+                            crossplot_fig = create_cluster_crossplot(
+                                rock_df,
+                                x_curve,
+                                y_curve,
+                                result.cluster_labels,
+                                cluster_interpretations=result.cluster_interpretations,
+                                facies_colors=facies_colors,
+                                title=f"Rock Type Classification: {x_curve} vs {y_curve}"
+                            )
+                            st.pyplot(crossplot_fig)
+                            plt.close(crossplot_fig)
+                            
+                            st.caption("⭐ Stars mark cluster centroids")
+                    
+                    with viz_tab3:
+                        if len(result.feature_columns) >= 3:
+                            st.markdown("**Interactive 3D visualization of rock types:**")
+                            
+                            # Select 3 curves for 3D plot
+                            available_3d = [col for col in result.feature_columns if col in rock_df.columns]
+                            
+                            if len(available_3d) >= 3:
+                                scatter_3d_fig = create_3d_cluster_scatter(
+                                    rock_df,
+                                    available_3d[:3],
+                                    result.cluster_labels,
+                                    cluster_interpretations=result.cluster_interpretations,
+                                    facies_colors=facies_colors,
+                                    title="3D Rock Type Classification"
+                                )
+                                
+                                if scatter_3d_fig:
+                                    st.plotly_chart(scatter_3d_fig, use_container_width=True)
+                                    st.caption("🖱️ Drag to rotate, scroll to zoom, hover for details")
+                                else:
+                                    st.warning("Plotly not available for 3D visualization")
+                            else:
+                                st.info("Need at least 3 feature curves for 3D visualization")
+                        else:
+                            st.info("Need at least 3 feature curves for 3D visualization. Current: " + 
+                                   ", ".join(result.feature_columns))
+                    
+                    # Export functionality
+                    st.markdown("### 📤 Export Results")
+                    
+                    export_col1, export_col2 = st.columns(2)
+                    
+                    with export_col1:
+                        # Create export dataframe
+                        export_df = rock_df[['DEPTH'] + [c for c in result.feature_columns if c in rock_df.columns]].copy()
+                        export_df['FACIES_CLUSTER'] = result.cluster_labels
+                        export_df['FACIES_NAME'] = [
+                            result.cluster_interpretations.get(label, f"Facies {label+1}") if label >= 0 else "Unknown"
+                            for label in result.cluster_labels
+                        ]
+                        
+                        if result.cluster_probabilities is not None:
+                            for i in range(result.num_clusters):
+                                export_df[f'PROB_CLUSTER_{i}'] = result.cluster_probabilities[:, i]
+                        
+                        csv = export_df.to_csv(index=False)
+                        st.download_button(
+                            "📥 Download Classification Results (CSV)",
+                            csv,
+                            "rock_classification_results.csv",
+                            "text/csv",
+                            key="download_rock_csv"
+                        )
     
     except Exception as e:
         st.error(f"Error loading files: {str(e)}")
