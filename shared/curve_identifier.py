@@ -89,6 +89,99 @@ def _percentile_range(data: np.ndarray) -> Optional[Tuple[float, float]]:
     return (float(np.percentile(valid_data, 7)), float(np.percentile(valid_data, 93)))
 
 
+# =============================================================================
+# DOI-AWARE RESISTIVITY CLASSIFICATION HELPERS
+# =============================================================================
+
+def extract_valid_doi(mnemonic: str) -> Optional[int]:
+    """
+    Extract Depth of Investigation (DOI) from mnemonic.
+    
+    DOI must be a 2 or 3 digit numeric suffix. Single-digit suffixes 
+    (e.g. RLA5) are NOT DOI - they represent curve index/channel number.
+    
+    Args:
+        mnemonic: Curve mnemonic string (e.g., 'AT90', 'AE60', 'RLA5')
+        
+    Returns:
+        Integer DOI value (e.g., 90, 60) or None if no valid DOI suffix
+        
+    Examples:
+        'AT90' -> 90 (valid: 2-digit)
+        'AE60' -> 60 (valid: 2-digit)  
+        'R40'  -> 40 (valid: 2-digit)
+        'RLA5' -> None (invalid: single digit = channel index)
+        'GR'   -> None (no numeric suffix)
+    """
+    if not mnemonic:
+        return None
+    
+    # Match exactly 2 or 3 digit suffix at end of string
+    m = re.search(r'(\d{2,3})$', mnemonic)
+    if m:
+        return int(m.group(1))
+    
+    return None
+
+
+def classify_resistivity_by_doi(
+    resistivity_curves: List[Tuple[str, float, 'CurveType']]
+) -> Dict[str, 'CurveType']:
+    """
+    Classify resistivity curves by Depth of Investigation (DOI) suffix.
+    
+    This is a deterministic post-identification classification step that uses
+    DOI suffixes to correctly distinguish deep/medium/shallow resistivity.
+    
+    Args:
+        resistivity_curves: List of (mnemonic, confidence_score, current_type) tuples
+                           for all identified resistivity curves
+        
+    Returns:
+        Dict mapping mnemonic to reclassified CurveType:
+        - Highest DOI suffix -> RES_DEEP
+        - Next lower DOI -> RES_MED  
+        - Lowest DOI suffix -> RES_SHAL
+        
+        Returns empty dict if no valid DOI suffixes found (fallback to scoring)
+        
+    Examples:
+        [('AT90', 0.8, RES_DEEP), ('AT60', 0.75, RES_MED), ('AT10', 0.7, RES_SHAL)]
+        -> {'AT90': RES_DEEP, 'AT60': RES_MED, 'AT10': RES_SHAL}
+    """
+    # Import here to avoid circular reference issues
+    from enum import Enum
+    
+    curves_with_doi = []
+    
+    for mnemonic, score, current_type in resistivity_curves:
+        doi = extract_valid_doi(mnemonic)
+        if doi is not None:
+            curves_with_doi.append((mnemonic, doi, score))
+    
+    # If no valid DOI found, return empty -> fallback to existing logic
+    if not curves_with_doi:
+        return {}
+    
+    # Sort by DOI descending (highest DOI = deepest investigation)
+    curves_with_doi.sort(key=lambda x: x[1], reverse=True)
+    
+    result = {}
+    
+    # Import CurveType for return values (forward reference workaround)
+    # Note: CurveType is defined below, so we reference it dynamically
+    if len(curves_with_doi) >= 1:
+        result[curves_with_doi[0][0]] = "RES_DEEP"  # Will be converted later
+    
+    if len(curves_with_doi) >= 2:
+        result[curves_with_doi[1][0]] = "RES_MED"
+    
+    if len(curves_with_doi) >= 3:
+        result[curves_with_doi[2][0]] = "RES_SHAL"
+    
+    return result
+
+
 class CurveType(Enum):
     """Standard curve types in well logging."""
     DEPTH = "DEPTH"
@@ -1171,9 +1264,68 @@ class CurveIdentifier:
         curve_results: Dict[str, CurveIdentificationResult],
         candidates_by_type: Dict[CurveType, List[Tuple[str, float]]]
     ) -> Tuple[Dict[str, CurveIdentificationResult], List[str]]:
-        """Layer 9: Choose best curve when duplicates exist."""
+        """
+        Layer 9: Choose best curve when duplicates exist.
+        
+        For resistivity curves, applies DOI-aware classification first:
+        - Extracts 2-3 digit DOI suffixes from mnemonics
+        - Highest DOI = RES_DEEP, lowest = RES_SHAL
+        - Falls back to confidence-based selection if no valid DOI found
+        """
         duplicate_warnings = []
         
+        # =================================================================
+        # DOI-AWARE RESISTIVITY CLASSIFICATION (Pre-step for resistivity)
+        # =================================================================
+        # Collect all resistivity candidates across types
+        resistivity_types = {CurveType.RES_DEEP, CurveType.RES_MED, CurveType.RES_SHAL}
+        all_resistivity_candidates = []
+        
+        for curve_type in resistivity_types:
+            if curve_type in candidates_by_type:
+                for mnemonic, confidence in candidates_by_type[curve_type]:
+                    all_resistivity_candidates.append((mnemonic, confidence, curve_type))
+        
+        # Apply DOI classification if we have multiple resistivity curves
+        if len(all_resistivity_candidates) > 1:
+            doi_classification = classify_resistivity_by_doi(all_resistivity_candidates)
+            
+            if doi_classification:
+                # DOI classification succeeded - reclassify curves by DOI ordering
+                doi_info = []
+                for mnemonic, new_type_str in doi_classification.items():
+                    doi_value = extract_valid_doi(mnemonic)
+                    new_type = CurveType(new_type_str)  # Convert string to enum
+                    
+                    # Update the curve result with new classification
+                    if mnemonic in curve_results:
+                        old_type = curve_results[mnemonic].identified_type
+                        curve_results[mnemonic].identified_type = new_type
+                        curve_results[mnemonic].explanation += f" [DOI-reclassified: {old_type.value} → {new_type.value} based on DOI={doi_value}]"
+                    
+                    doi_info.append(f"{mnemonic}(DOI={doi_value})->{new_type.value}")
+                
+                # Rebuild candidates_by_type with DOI-based assignments
+                for res_type in resistivity_types:
+                    candidates_by_type[res_type] = []
+                
+                for mnemonic, new_type_str in doi_classification.items():
+                    new_type = CurveType(new_type_str)
+                    # Get original confidence
+                    orig_confidence = next(
+                        (conf for m, conf, _ in all_resistivity_candidates if m == mnemonic), 
+                        0.0
+                    )
+                    candidates_by_type[new_type].append((mnemonic, orig_confidence))
+                
+                # Add DOI classification note to warnings
+                duplicate_warnings.append(
+                    f"DOI-aware resistivity classification applied: {', '.join(doi_info)}"
+                )
+        
+        # =================================================================
+        # STANDARD DUPLICATE RESOLUTION (for all curve types)
+        # =================================================================
         for curve_type, candidates in candidates_by_type.items():
             if len(candidates) > 1:
                 # Sort by confidence
